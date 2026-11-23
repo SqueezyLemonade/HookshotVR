@@ -76,6 +76,25 @@ passes: later visits are smooth. See [Known issues](vr-known-issues.md#stutter-w
 - **Recenter view** (VR menu, **General**) makes where you look now straight ahead.
 - **Eye height** (VR menu, **General**, **Headset**) moves the first-person view up or down.
 
+## Which drive is used
+
+Everything big is in the folder you unpacked HookshotVR into (the **Hookshot Folder**), on that drive: the game
+(`main-game`, about 40 GB), the build's work folder (`main-work`, with the build's temporary files and the game file's
+check), the shader caches on Linux (`cache`), and an update's download (`.update`). A game rebuild needs a second game
+folder there while it builds: about 60 GB free.
+
+Some things always stay on the system drive (C: on Windows, your home on Linux). They are small, except the graphics
+driver's shader cache:
+
+| What | Windows | Linux | Size |
+| --- | --- | --- | --- |
+| Saves, save backups and the game's settings | `%APPDATA%\Hookshot`, `%LOCALAPPDATA%\Hookshot` | `~/.local/share/hookshot` | tens of MB |
+| The launcher's settings, logs and crash reports | `%LOCALAPPDATA%\HookshotVR` | `~/.config/HookshotVR`, `~/.local/share/HookshotVR` | a few MB, more with many build logs |
+| The graphics driver's own shader cache | `%LOCALAPPDATA%\NVIDIA\GLCache`, `AMD\VkCache` or `Intel\ShaderCache` | in the Hookshot Folder (`cache`) | up to a few GB, the driver's own limit |
+
+On Windows the driver's cache is the driver's: it fills while the first build prepares the shaders. NVIDIA's limit is
+**Shader Cache Size** in the NVIDIA Control Panel. Free space is checked on the Hookshot Folder's drive only.
+
 ## How to send a log
 
 A log helps us find what went wrong. Send it with a short description: what you did, where you were in the game, your

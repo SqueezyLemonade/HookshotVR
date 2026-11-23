@@ -46,6 +46,16 @@ void kill_tree(Proc &p);
 void forget(Proc &p);              // nobody asks how it ends (spawn_quiet's)
 bool process_running(const char *name);   // a process of that name, without .exe ("hookshot", "vrserver")
 bool on_path(const char *tool);
+// The system's own copy of a tool the update runs ("curl", "tar"): Windows' System32\curl.exe and tar.exe (Windows 10 1803
+// and later; tar.exe is bsdtar, which unpacks a .zip), never one found first on PATH or beside the launcher. Linux: the one
+// on PATH. "" when there is none
+std::string system_tool(const char *name);
+
+// ---- the release ----
+const char *launcher_file();    // the launcher's own file name ("hookshotvr-launcher", "hookshotvr-launcher.exe")
+const char *release_suffix();   // the end of this platform's release archive's name ("-linux-x86_64.tar.gz", "-windows-x64.zip")
+// The command that unpacks such an archive into dir (which exists)
+std::vector<std::string> unpack_cmd(const std::string &archive, const std::string &dir);
 
 // ---- the desktop ----
 // The system's own file or folder dialog. Blocks: system.cpp calls it on a thread. "" when cancelled or there is none

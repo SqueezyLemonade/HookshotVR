@@ -80,6 +80,15 @@ bool remove_tree(const std::string &p) {
     return !e;
 }
 
+static std::string first_line(const std::string &file) {
+    std::string t = read_file(file);
+    t = t.substr(0, t.find_first_of("\r\n"));
+    while (!t.empty() && t.back() == ' ') t.pop_back();
+    return t;
+}
+std::string source_stamp(const std::string &repo) { return repo.empty() ? "" : first_line(join(repo, "GAME_STAMP")); }
+std::string game_stamp(const std::string &game) { return game.empty() ? "" : first_line(join(game, ".hookshotvr_stamp")); }
+
 static bool is_builder(const std::string &b) { return plat::is_exe(plat::builder_python(b)); }
 static bool is_repo(const std::string &d) { return exists(join(d, "nx2/make_game.py")) && is_dir(join(d, "vr/launcher")); }
 
@@ -275,6 +284,7 @@ namespace {
 std::mutex b_mu;
 std::deque<std::string> b_lines;
 Proc b_proc;   // (under b_mu)
+std::string b_stamp;   // (under b_mu: the source's game stamp, for the folder once built)
 std::atomic<bool> b_eof{false}, b_cancel{false};
 
 std::mutex c_mu;
@@ -292,6 +302,9 @@ static Env tools_env(const Paths &p, const std::string &repo) {
     if (!p.cache.empty()) e["XDG_CACHE_HOME"] = p.cache;
     e["HOOKSHOT_VK_PREBUILT"] = std::nullopt;
     e["PYTHONUNBUFFERED"] = "1";
+    // (temporary files in the work folder, on the Hookshot Folder's drive: not the system drive's %TEMP%, nor a /tmp in RAM)
+    if (!p.work.empty() && make_dirs(join(p.work, "tmp")))
+        for (const char *t : {"TMPDIR", "TEMP", "TMP"}) e[t] = join(p.work, "tmp");
     return e;
 }
 
@@ -326,6 +339,7 @@ bool build_start(const Paths &p, const BuildJob &j, const std::string &fake) {
         b_lines.clear();
         b_lines.push_back("@@stage read");
         b_proc = pr;
+        b_stamp = source_stamp(j.repo);
     }
     b_eof = false, b_cancel = false;
     std::thread([pr] {
@@ -376,6 +390,15 @@ void build_poll(BuildState &s) {
         s.cancelled = b_cancel;
         s.ok = code == 0 && !s.folder.empty() && !b_cancel;
         if (s.ok) s.fraction = 1;
+        // (what the game was built from, so an update knows whether it must be built again: update.h)
+        std::string stamp = join(s.folder, ".hookshotvr_stamp");
+        if (s.ok && !b_stamp.empty()) {
+            std::ofstream f(P(stamp));
+            f << b_stamp << "\n";
+        } else if (s.ok) {
+            std::error_code e;
+            fs::remove(P(stamp), e);   // (a checkout's source: nothing known)
+        }
     }
 }
 
@@ -392,7 +415,9 @@ void check_game_file(const Paths &p, const std::string &file, const std::string 
         c_done = false;
     }
     std::vector<std::string> argv = make_game_cmd(p, p.repo, fake);
-    argv.insert(argv.end(), {"--check", "--game", file});
+    // (--work: make_game.py's default is the system drive's (%LOCALAPPDATA%\\HookshotBuilder on Windows), where the check
+    // unpacks the game's code to look at it; the Hookshot Folder's work folder keeps it on the drive the game is built on)
+    argv.insert(argv.end(), {"--check", "--game", file, "--work", p.work});
     Env env = tools_env(p, p.repo);
     std::string cwd = p.repo;
     std::thread([argv, env, cwd] {

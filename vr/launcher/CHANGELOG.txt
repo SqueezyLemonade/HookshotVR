@@ -1,5 +1,10 @@
 v1.0.1
-Alpha v1.0.1: Free space checks the drive you unpacked to, not C: or your home drive
+Alpha v1.0.1: the launcher updates itself from GitHub releases
+A launcher-only update keeps your game: no rebuild
+The game is built again only when it changed
+Free space checks the drive you unpacked to, not C: or your home drive
+The game file's check, temporary files and updates stay on that drive
+Downloads are checked against the release's SHA256SUMS.txt
 
 v1.0.0
 Alpha v1.0.0: the first public release

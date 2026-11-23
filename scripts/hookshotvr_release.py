@@ -12,8 +12,8 @@ vr/launcher/src/system.cpp find_hookshot, find_repo):
       hookshotvr-launcher[.exe], fonts/, art/, CHANGELOG.txt   the launcher (vr/launcher/build.sh, build-windows.sh)
       README.txt                                               how to start (written here)
       HookshotVR/        the source the game is built from: the commit's tracked files (git archive, so never a working
-                         tree's untracked files) less DEV_ONLY (the agents' skills, CI), and a VERSION file (nx2/version.py;
-                         there is no .git)
+                         tree's untracked files) less DEV_ONLY (the agents' skills, CI), a VERSION file (nx2/version.py;
+                         there is no .git) and a GAME_STAMP file (game_stamp: what the launcher's update compares)
       builder/           Hookshot's builder, as Hookshot ships it: what the source builds with
     Windows also:
       SDL2.dll, SDL3.dll                    the launcher's window (Hookshot's sdl2-compat SDL2.dll on SDL3)
@@ -31,7 +31,9 @@ zips (HookshotBuilder-<part>-<sha>.zip), llvm-mingw's Windows zip and Khronos' o
 zip of the list is checked against the list's size and SHA-256, llvm-mingw against scripts/make_setup_parts.py LLVM.
 
 Staging goes into <out folder>/staging (on disk, not a RAM folder: the Linux builder alone is ~900 MB). Writes
-HookshotVR-<version>-windows-x64.zip, HookshotVR-<version>-linux-x86_64.tar.gz and SHA256SUMS.txt into <out folder>.
+HookshotVR-<version>-windows-x64.zip, HookshotVR-<version>-linux-x86_64.tar.gz, SHA256SUMS.txt and GAME_STAMPS.txt into
+<out folder>: all four are the GitHub release's files (the launcher's update reads SHA256SUMS.txt to check the archive it
+downloads, GAME_STAMPS.txt to say before it whether the game will be built again: vr/launcher/src/update.h).
 """
 import argparse
 import hashlib
@@ -113,6 +115,49 @@ def source(dest, commit, version):
     with open(os.path.join(dest, "VERSION"), "w", encoding="utf-8") as f:
         f.write("hookshotvr-%s-%s\n" % (slug(version).lower(), describe.rsplit("-", 1)[-1]))
     return describe
+
+
+# What the game's build does not read: a release that changes only these is launcher-only, and the launcher's update keeps
+# the game folder as it is (vr/launcher/src/update.h). Everything else in the source is the game's. Paths as in dev_only().
+# VERSION is left out on purpose: the build writes it into the game (nx2/version.py), but it names each release, so a
+# launcher-only release would build the game again for its name alone; the game keeps the name of the release it was built
+# from. (tests/test_hookshotvr_release.py: nothing the build runs opens one of these)
+NOT_GAME = (
+    "vr/launcher/",        # the launcher: a program of its own (nx2/build.py leaves it out)
+    "docs/", "tests/", "website/",
+    "readme.md", "CHANGELOG.md", "changelog.txt", "CONTRIBUTING.md", "START HERE.md",
+    "VERSION", "GAME_STAMP",
+)
+NOT_GAME_TOP = re.compile(r"release-notes-[^/]*\.md$")
+
+
+def not_game(rel):
+    return any(rel == d or (d.endswith("/") and rel.startswith(d)) for d in NOT_GAME) or bool(NOT_GAME_TOP.match(rel))
+
+
+def game_stamp(src, builder_tag):
+    """A hash of everything in the staged source the build reads (its path and bytes, all but NOT_GAME), and the builder's
+    tag (another Hookshot builder makes another game): the same stamp, the same game. Written into the source as GAME_STAMP"""
+    h = hashlib.sha256(b"hookshotvr-game-stamp 1\0builder %s\0" % builder_tag.encode("utf-8"))
+    files = []
+    for d, ds, fs in os.walk(src):
+        ds.sort()
+        for f in fs:
+            rel = os.path.relpath(os.path.join(d, f), src).replace(os.sep, "/")
+            if not not_game(rel):
+                files.append(rel)
+    for rel in sorted(files):
+        p = os.path.join(src, rel)
+        h.update(rel.encode("utf-8") + b"\0")
+        if os.path.islink(p):
+            h.update(b"link " + os.readlink(p).encode("utf-8") + b"\0")
+        else:
+            with open(p, "rb") as f:
+                h.update(hashlib.sha256(f.read()).digest())
+    stamp = h.hexdigest()
+    with open(os.path.join(src, "GAME_STAMP"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(stamp + "\n")
+    return stamp
 
 
 def launcher(src, dest, exe):
@@ -241,6 +286,8 @@ def windows(a, stage, describe):
         if not lics:   # (Apache-2.0: shipped with its licence or not at all)
             sys.exit("%s: no LICENSE in it" % loaders[-1])
     print("  openxr_loader.dll from %s" % loaders[-1])
+    a.stamp = game_stamp(src, tag)
+    print("  game stamp %s (builder %s)" % (a.stamp[:16], tag))
     readme(top, "windows", a.version, describe)
     out = os.path.join(a.out, "HookshotVR-%s-windows-x64.zip" % slug(a.version))
     with zipfile.ZipFile(out + ".new", "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -263,6 +310,10 @@ def linux(a, stage, describe):
         sys.exit("%s: not an unpacked Hookshot Linux builder (no usr/python/bin/python3)" % a.linux_builder)
     # (as Hookshot ships it: its files only, not the caches a run of it left: __pycache__)
     shutil.copytree(a.linux_builder, builder, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", *DEV_ONLY_DIRS))
+    with open(os.path.join(builder, "hookshot-linux.txt"), encoding="utf-8") as f:
+        tag = f.readline().strip()
+    a.stamp = game_stamp(os.path.join(top, TOP), tag)
+    print("  game stamp %s (builder %s)" % (a.stamp[:16], tag))
     readme(top, "linux", a.version, describe)
     out = os.path.join(a.out, "HookshotVR-%s-linux-x86_64.tar.gz" % slug(a.version))
 
@@ -289,7 +340,7 @@ def main():
     a = p.parse_args()
     a.out = os.path.abspath(a.out)
     os.makedirs(a.out, exist_ok=True)
-    made = []
+    made, stamps = [], []
     for plat, need, fn in (("windows", (a.windows_launcher, a.windows_parts), windows),
                            ("linux", (a.linux_launcher, a.linux_builder), linux)):
         if not all(need):
@@ -300,15 +351,28 @@ def main():
         print("%s:" % plat, flush=True)
         describe = source(os.path.join(stage, TOP, TOP), a.commit, a.version)
         made.append(fn(a, stage, describe))
+        stamps.append(a.stamp)
         if not a.keep_staging:
             shutil.rmtree(stage)
         print("  %s: %d MB" % (made[-1], os.path.getsize(made[-1]) >> 20), flush=True)
     if not made:
         sys.exit("nothing to make: give --windows-launcher and --windows-parts, or --linux-launcher and --linux-builder")
-    with open(os.path.join(a.out, "SHA256SUMS.txt"), "a", encoding="utf-8") as f:
-        for m in made:
-            f.write("%s  %s\n" % (sha256(m), os.path.basename(m)))
+    listing(os.path.join(a.out, "SHA256SUMS.txt"), {os.path.basename(m): sha256(m) for m in made})
+    listing(os.path.join(a.out, "GAME_STAMPS.txt"), {os.path.basename(m): st for m, st in zip(made, stamps)})
     return 0
+
+
+def listing(path, new):
+    """'<hash>  <file>' lines: the files made now replace their own earlier lines (a platform made again), the others' kept
+    (the platforms made in two runs). The launcher takes the first line naming its archive"""
+    lines = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            lines = [l for l in f.read().splitlines() if l.strip() and l.split(None, 1)[-1].lstrip("*") not in new]
+    lines += ["%s  %s" % (h, name) for name, h in new.items()]
+    with open(path + ".new", "w", encoding="utf-8", newline="\n") as f:
+        f.write("".join(l + "\n" for l in lines))
+    os.replace(path + ".new", path)
 
 
 if __name__ == "__main__":

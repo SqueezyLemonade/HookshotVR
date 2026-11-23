@@ -129,6 +129,25 @@ Not done yet: **Deku Nuts, Bombchus, Magic Beans, Megaton Hammer, Din's Fire, Fa
 Business Scrub's seed and the trade items**. Equip them in the menu and press the trigger to use them, the game's own way.
 They work, but not by hand yet.
 
+## Updates
+
+From v1.0.1 on, the launcher updates itself from this project's GitHub releases. When a new one is out, the main screen
+shows **Update** with its version and what it takes:
+
+- **Launcher only:** a small download (a few hundred MB). The launcher is replaced and starts again; your game is kept as
+  it is, nothing is built.
+- **Game rebuild:** the game changed too. After the download the launcher starts again and builds the game into a second
+  folder beside the one you play (about 60 GB free while it builds), then switches to it and deletes the old one.
+
+**Update Log** shows what is new, and **View Online** opens the release on GitHub. **Settings**, **Updates**: **Notify**
+(the default) asks first, **Automatic** downloads in the background so **Update** only installs, **Off** never looks.
+The launcher looks once each time it starts, and says nothing when it is offline. Your saves, settings,
+`hookshot_env.txt` and crash reports are kept.
+
+**v1.0.0 cannot update itself:** download v1.0.1 once by hand. To keep the game you built, unpack it over
+your old folder: the launcher keeps your game, and builds it again once at its next update (it cannot tell what the old
+version built it from).
+
 ## Saves and settings
 
 Your saves are Hookshot's: on Linux in `~/.local/share/hookshot`, on Windows in `%APPDATA%\Hookshot`.

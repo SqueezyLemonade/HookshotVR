@@ -3,12 +3,16 @@
     hookshotvr-launcher --fake-build vr/launcher/tools/fake_make_game.py
     FAKE_FAIL=1: stops in the compile with an @@error line
     FAKE_GAME=1: leaves a stand-in game in --out (romfs/ and a hookshot that prints its environment), for the self-test's update
+    FAKE_ARGS=<file>: its arguments written there, one a line, then TMPDIR=<its TMPDIR> (the self-test's check of the check)
 """
 import os
 import sys
 import time
 
 args = sys.argv[1:]
+if os.environ.get("FAKE_ARGS"):
+    with open(os.environ["FAKE_ARGS"], "w", encoding="utf-8") as f:
+        f.write("".join(a + "\n" for a in args) + "TMPDIR=%s\n" % os.environ.get("TMPDIR", ""))
 if "--check" in args:
     print("@@check ok Ocarina of Time 1.1.1", flush=True)
     sys.exit(0)

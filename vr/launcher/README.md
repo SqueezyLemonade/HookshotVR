@@ -23,8 +23,10 @@ vr/launcher/build/hookshotvr-launcher
 builds or touches the game. `build.sh test` also runs `tools/selftest.cpp`: the build's lines, a failed build, Cancel,
 the game file's check and two launches, all against stand-ins (a fake `make_game.py` and a fake game), never the real
 ones. It also checks the VR runtime choice, Start With, the game's environment (no `RX_VK_VRAM_MB`), the desktop entry
-(written in a scratch home, a file of the player's kept), and an update through to its switch and clean-up, and a failed one
-that leaves the build as it was.
+(written in a scratch home, a file of the player's kept), and the update against a stand-in GitHub
+(`tools/fake_release_server.py`): offline and rate-limited (quiet), a launcher-only release (the launcher swapped, the
+game kept, no banner after), a game release (rebuilt into a new folder), a bad checksum (refused) and a rebuild that
+fails (the old build kept).
 
 | Option | |
 | --- | --- |
@@ -32,6 +34,8 @@ that leaves the build as it was.
 | `--screenshot <file.png> [--scale <n>]` | That screen into a PNG, without showing a window |
 | `--art <folder>` | The art slots from that folder |
 | `--no-art` | The drawn placeholders instead of the art slots |
+| `--update` | Update pressed for you once the check finds a newer release (or an update's rebuild is pending) |
+| `--after-update` | What the update starts the new launcher with: it says "Updated to" and builds the game again when the update needs it |
 | `--fake-build <script.py>` | A script in `make_game.py`'s place, to try the build screens: `tools/fake_make_game.py` (`FAKE_FAIL=1` stops it in the compile) |
 | `--play [vr\|desktop]` | Play pressed once the launcher is ready (in VR: the runtime and the headset answer); that start's mode, not saved. The desktop entry's right-click actions |
 | `--build` | Build pressed once the first start's rows are good (the game file from `launcher.ini`, its check passed) |
@@ -117,27 +121,58 @@ No `RX_VK_VRAM_MB`: every card gets Hookshot's own budget.
 
 ## Updates
 
-`src/update.cpp`, off until the public release repository exists: `upd::kReleaseRepo` is empty, so the check finds
-nothing and the banner never shows (`--state update` and `--state updating` show it). Never the private backup remote,
-and never a token. With it set, `git ls-remote --tags` finds a newer `vX.Y.Z`; Automatic also downloads it and reads its
-`vr/launcher/CHANGELOG.txt` for the Update Log; Notify only shows the banner. The banner ("A new HookshotVR update is
-available") or Update then does everything, and leaves the build the player plays alone until a new one is whole:
+`src/update.cpp`. Releases are GitHub releases of [SqueezyLemonade/HookshotVR](https://github.com/SqueezyLemonade/HookshotVR):
+a tag `vX.Y.Z`, the two archives a player downloads by hand, `SHA256SUMS.txt` and `GAME_STAMPS.txt`
+(`scripts/hookshotvr_release.py` makes all four). Never git.notrexed.dev, never a token, only HTTPS.
 
-1. **Download** the release's source into `<data>/versions/<vX>/HookshotVR` (for now a shallow `git clone` of the tag).
-2. **Build** the game from it into a new folder, `<Hookshot Folder>/<vX>-game`: from the game file when it is still
-   there, else from the game files the old folder keeps (`romfs/`, `.hookshot_exefs/`). The translation (`main-work/`)
-   is shared, so only what changed builds again.
-3. **Check** the build: the builder said `@@done` for that folder, and the game and its `romfs/` are in it.
-4. **Switch**: crash reports saved, the player's `hookshot_env.txt` carried over, then `launcher.ini` names the new
-   source and folder (one whole write).
-5. **Clean** up the old build: its folder in the Hookshot Folder, and its source when the launcher downloaded it. Never a
-   folder the player chose.
+**The check**, once each start, on a thread, and only for a launcher in a release's folder (its own folder holds
+`HookshotVR/`: `upd::install_root`; a checkout updates with git): GitHub's releases list (`api.github.com`, no token:
+60 asks an hour per address), the newest `vX.Y.Z` that is not a draft (the alphas are pre-releases, so not
+`/releases/latest`). Newer than `upd::kVersion`, with this platform's archive and a `SHA256SUMS.txt`: the banner shows.
+Its Update Log is the release's `vr/launcher/CHANGELOG.txt` at the tag (`raw.githubusercontent.com`), else the release
+notes' list items: never empty. Its `GAME_STAMPS.txt` line says before any download whether the game will be built
+again. Offline, rate-limited, a bad answer: no banner, nothing said. Updates **Off**: nothing asked. **Automatic** also
+downloads and checks the archive in the background, so Update only installs.
 
-A failure or Cancel anywhere before the switch deletes what the update made and leaves the old build as it was. What an
-update stopped midway left (the launcher closed in it) is cleared at the next start. Untested against a real release.
+**The game stamp** (`GAME_STAMP` in a release's source, `game_stamp` in the release script): a SHA-256 of every file the
+build reads (all of the source but `NOT_GAME`: `vr/launcher/`, `docs/`, `tests/`, `website/`, the top-level notes and
+`VERSION`) and the builder's tag. A build that finishes writes its source's stamp into the game folder
+(`.hookshotvr_stamp`, `system.cpp build_poll`).
 
-The version (`upd::kVersion`, v1.0.1, shown as `kVersionName`, Alpha v1.0.1) opens the Changelog, read from `CHANGELOG.txt`: a `vX.Y.Z` line, then its lines.
-View Online shows once `kReleasePage` is set.
+**Update** (the banner, or Update in the Update Log), not while the game runs:
+
+1. **Download** the archive into `<release folder>/.update/download/<vX>` (beside the launcher: the drive it was
+   unpacked to), with curl (`curl.exe` and `tar.exe` from Windows' System32 on Windows 10 1803 and later, never ones on
+   PATH), and **check** it against `SHA256SUMS.txt`: a mismatch is refused and deleted ("Bad download").
+2. **Unpack** it into `.update/new` and check it: the launcher, the source, and a `CHANGELOG.txt` that says this
+   release.
+3. **Install**: each thing the archive ships (the launcher, its fonts, art, DLLs and changelog, `HookshotVR/`,
+   `builder/`) is renamed into `.update/old` and the new one renamed into its place (one drive: renames; Windows lets a
+   running exe and its DLLs be renamed). A failure renames everything back. The game folders, `main-work`, `cache`,
+   saves, settings, `hookshot_env.txt` and crash reports are never touched.
+4. **Restart**: the new launcher starts with `--after-update` and this one closes. The new one deletes `.update` (the
+   old launcher may still be closing: tried for a few seconds), says "Updated to", and, when the new source's stamp
+   differs from the game's (or the game has none: built before v1.0.1), builds the game again at once:
+5. **Rebuild** into a new folder, `<Hookshot Folder>/<vX>-game`, from the game file when it is still there, else from
+   the game files the old folder keeps (`romfs/`, `.hookshot_exefs/`); `main-work` is shared, so only what changed
+   compiles. Then the **switch** (crash reports saved, `hookshot_env.txt` carried over, `launcher.ini` names the new
+   folder: one whole write) and the **clean-up** of the old folder. A failure or Cancel deletes the new folder and
+   keeps the old one. A rebuild left undone (the launcher closed in it) is offered again by the banner
+   (**Rebuild** `vX`).
+
+The banner says which it is, with the free space it needs on the Hookshot Folder's drive: **Launcher only** (4 GB: the
+download and what it unpacks) or **Game rebuild** (64 GB: a second game folder while it builds). Up to date means the
+launcher's version is the newest release's and the game's stamp is its source's: after an update the banner is gone.
+
+v1.0.0 cannot update itself (its update looked at git.notrexed.dev and only rebuilt the game): its players download
+v1.0.1 once by hand.
+
+`HOOKSHOTVR_DEV_RELEASES=<base URL>`: **development only**, the self-test's. The update reads `<base>/api` for
+api.github.com, `<base>/site` for github.com and `<base>/raw` for raw.githubusercontent.com, plain http allowed
+(`tools/fake_release_server.py` serves a folder so). Never set it for a player.
+
+The version (`upd::kVersion`, v1.0.1, shown as `kVersionName`, Alpha v1.0.1) opens the Changelog, read from
+`CHANGELOG.txt`: a `vX.Y.Z` line, then its lines. View Online opens the release's page on GitHub.
 
 ## Art slots
 
@@ -170,7 +205,7 @@ Fonts: EB Garamond Medium, SemiBold and Italic in `fonts/` (OFL, static cuts of 
 | `src/platform.h` | All that differs between platforms: folders, processes, dialogs, the OpenXR loader and runtimes, the builder's toolchain |
 | `src/platform_posix.cpp`, `src/platform_win32.cpp` | Its Linux half and its Windows half |
 | `src/image.cpp` | PNG in and out (libpng) |
-| `tools/` | `fake_make_game.py` and `selftest.cpp` |
+| `tools/` | `fake_make_game.py`, `fake_release_server.py` and `selftest.cpp` |
 
 ## Windows
 

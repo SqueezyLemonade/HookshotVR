@@ -55,13 +55,17 @@ double now_seconds() {
 std::string home() { return known_folder(FOLDERID_Profile); }
 std::string config_dir() { return join(known_folder(FOLDERID_LocalAppData), "HookshotVR"); }
 std::string data_dir() { return config_dir(); }
+// (read once: an update renames the running launcher aside)
 std::string exe_dir() {
-    std::wstring buf(32768, L'\0');
-    DWORD n = GetModuleFileNameW(nullptr, &buf[0], (DWORD)buf.size());
-    buf.resize(n);
-    std::string s = U(buf);
-    size_t cut = s.find_last_of("\\/");
-    return cut == std::string::npos ? "." : s.substr(0, cut);
+    static const std::string dir = [] {
+        std::wstring buf(32768, L'\0');
+        DWORD n = GetModuleFileNameW(nullptr, &buf[0], (DWORD)buf.size());
+        buf.resize(n);
+        std::string s = U(buf);
+        size_t cut = s.find_last_of("\\/");
+        return cut == std::string::npos ? std::string(".") : s.substr(0, cut);
+    }();
+    return dir;
 }
 char sep() { return '\\'; }
 std::string env(const char *name) {
@@ -219,6 +223,20 @@ bool process_running(const char *name) {
 bool on_path(const char *tool) {
     wchar_t buf[MAX_PATH];
     return SearchPathW(nullptr, W(tool).c_str(), L".exe", MAX_PATH, buf, nullptr) > 0;
+}
+
+std::string system_tool(const char *name) {
+    wchar_t dir[MAX_PATH];
+    UINT n = GetSystemDirectoryW(dir, MAX_PATH);
+    if (!n || n >= MAX_PATH) return "";
+    std::string p = join(U(std::wstring(dir, n)), std::string(name) + ".exe");
+    return is_exe(p) ? p : "";
+}
+
+const char *launcher_file() { return "hookshotvr-launcher.exe"; }
+const char *release_suffix() { return "-windows-x64.zip"; }
+std::vector<std::string> unpack_cmd(const std::string &archive, const std::string &dir) {
+    return {system_tool("tar"), "-xf", archive, "-C", dir};
 }
 
 // ---- the desktop ----

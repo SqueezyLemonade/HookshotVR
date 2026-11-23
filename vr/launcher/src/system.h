@@ -54,6 +54,11 @@ std::string pretty(const std::string &p);   // (the home folder as ~)
 std::string read_file(const std::string &p);
 bool copy_file(const std::string &from, const std::string &to);
 bool remove_tree(const std::string &p);
+// The game stamp: a hash of everything the build reads (scripts/hookshotvr_release.py game_stamp). The source's is its
+// GAME_STAMP file (a release's; a checkout has none). A game folder's is the stamp of the source it was built from, written
+// there after the build (.hookshotvr_stamp). "" when none
+std::string source_stamp(const std::string &repo);
+std::string game_stamp(const std::string &game);
 // The folders a configuration names, and what is in them
 struct Paths {
     std::string hookshot, builder, python, game, game_bin, repo, make_game, logs, crashes;
@@ -126,7 +131,8 @@ BuildJob first_build(const Paths &p, const std::string &game_file);
 bool build_start(const Paths &p, const BuildJob &j, const std::string &fake_script);
 void build_poll(BuildState &s);
 void build_cancel();
-// The game file's check (make_game.py --check): done(ok, text) from poll_check
+// (a build that finished records its source's game stamp in the folder it built)
+// The game file's check (make_game.py --check, in the Hookshot Folder's work folder): done(ok, text) from poll_check
 void check_game_file(const Paths &p, const std::string &file, const std::string &fake_script);
 bool poll_check(bool *ok, std::string *text);
 

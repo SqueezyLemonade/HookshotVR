@@ -46,13 +46,17 @@ static std::string xdg(const char *var, const char *fallback) {
 }
 std::string config_dir() { return join(xdg("XDG_CONFIG_HOME", ".config"), "HookshotVR"); }
 std::string data_dir() { return join(xdg("XDG_DATA_HOME", ".local/share"), "HookshotVR"); }
+// (read once: an update renames the running launcher aside, and /proc/self/exe follows it there)
 std::string exe_dir() {
-    char buf[4096];
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n <= 0) return ".";
-    buf[n] = 0;
-    std::string s(buf);
-    return s.substr(0, s.rfind('/'));
+    static const std::string dir = [] {
+        char buf[4096];
+        ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+        if (n <= 0) return std::string(".");
+        buf[n] = 0;
+        std::string s(buf);
+        return s.substr(0, s.rfind('/'));
+    }();
+    return dir;
 }
 char sep() { return '/'; }
 std::string env(const char *name) {
@@ -192,6 +196,21 @@ bool on_path(const char *tool) {
     while (std::getline(ss, dir, ':'))
         if (!dir.empty() && is_exe(join(dir, tool))) return true;
     return false;
+}
+
+std::string system_tool(const char *name) {
+    const char *path = getenv("PATH");
+    std::stringstream ss(path ? path : "/usr/bin:/bin");
+    std::string dir;
+    while (std::getline(ss, dir, ':'))
+        if (!dir.empty() && dir[0] == '/' && is_exe(join(dir, name))) return join(dir, name);
+    return "";
+}
+
+const char *launcher_file() { return "hookshotvr-launcher"; }
+const char *release_suffix() { return "-linux-x86_64.tar.gz"; }
+std::vector<std::string> unpack_cmd(const std::string &archive, const std::string &dir) {
+    return {system_tool("tar"), "-xzf", archive, "-C", dir, "--no-same-owner"};
 }
 
 // The output of a short command, its exit code in *code

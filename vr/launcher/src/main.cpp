@@ -15,6 +15,9 @@
 //                                               the headset answer); the desktop entry's Play actions
 //   hookshotvr-launcher --build                 Build pressed for you once the first start's rows are all good (the game file
 //                                               set in launcher.ini, its check passed)
+//   hookshotvr-launcher --update                Update pressed for you once the check finds one (or a rebuild is pending)
+//   hookshotvr-launcher --after-update          (the update starts the new launcher so: it says so, and builds the game
+//                                               again when the update needs that)
 //   hookshotvr-launcher --install               the "Hookshot VR" entry in the app menu and on the desktop, starting this
 //                                               launcher with no terminal, and its icon (into the data folder)
 //   hookshotvr-launcher --icon <file.png> [--scale <n>]   the launcher's icon alone (256 px at scale 1)
@@ -68,11 +71,13 @@ struct App {
     bool update_ready = false;
     upd::Release update;
     upd::Stage update_stage = upd::Stage::Idle;
+    bool after_update = false;   // (--after-update: the new launcher, started by the old one's update)
     // the game
     sys::Proc game;
     bool pending_play = false;   // (Play with Start With: the game starts once the runtime and the headset are there)
     bool auto_play = false;      // (--play: Play pressed once the launcher is ready)
     bool auto_build = false;     // (--build: Build pressed once the game file's check passes)
+    bool auto_update = false;    // (--update: Update pressed once there is one)
     std::string notice;
     double notice_until = 0;
     // VR
@@ -107,11 +112,22 @@ static std::string read_text(const std::string &p) {
     return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 }
 
-// Update: the one-click update of everything (update.h), shown on the Building screen
+// Update: the one-click update (update.h), shown on the Building screen. Not while the game runs (a rebuild deletes the
+// old game folder, and the files the update replaces are in use)
 static void start_update() {
     if (app.preview || upd::running() || !app.update_ready) return;
+    if (app.game.ok() || plat::process_running("hookshot")) return say("Game running");
+    app.build = sys::BuildState();
     if (upd::start(app.paths, app.cfg, app.update, app.fake_build)) app.screen = Screen::Building, app.overlay = Overlay::None;
     else say("Update failed");
+}
+
+// What the update is: the launcher alone (a small download), or the game built again too (a second game folder while it
+// builds), and the free space that needs
+static std::string update_kind(const upd::Release &r) {
+    char gb[48];
+    snprintf(gb, sizeof gb, " \xC2\xB7 %.0f GB", upd::needed_gb(r));
+    return (r.rebuild ? "Game rebuild" : "Launcher only") + std::string(gb);
 }
 
 static void start_build() {
@@ -246,7 +262,11 @@ static void screen_main(float t) {
         bool hb = false;
         if (hit("upbanner", CX, 455, CW - 8 - 140 - 12 - 150 - 12, 50, true, &hb)) start_update();
         chamfer(CX, 455, CW, 50, 8, rgb(0xC98B5C, hb ? 0.28f : 0.18f));
-        text(fonts.medium, 23, CX + 18, 480, kInkWarm, "A new HookshotVR update is available");
+        float room = CW - 8 - 140 - 12 - 150 - 12 - 36;
+        std::string what = (app.update.launcher ? "Update " : "Rebuild ") + app.update.version;
+        text(fonts.medium, 23, CX + 18, 480, kInkWarm, what);
+        float ww = text_width(fonts.medium, 23, what) + 24;
+        text(fonts.medium, 20, CX + 18 + ww, 480, kInkMuted, fit(fonts.medium, 20, update_kind(app.update), room - ww));
         if (small_button("uplog", CX + CW - 8 - 140 - 12 - 150, 462, 150, 36, "Update Log", false)) app.overlay = Overlay::UpdateLog;
         if (small_button("upgo", CX + CW - 8 - 140, 462, 140, 36, "Update", true)) start_update();
     }
@@ -313,6 +333,7 @@ static void screen_building() {
     bool failed = b.finished && !b.ok;
     const char *title = failed ? "Build Stopped" : step_title(b.step);
     if (app.update_stage == upd::Stage::Download) title = "Downloading";
+    else if (app.update_stage == upd::Stage::Install || app.update_stage == upd::Stage::Restart) title = "Installing";
     else if (app.update_stage == upd::Stage::Switch || app.update_stage == upd::Stage::Clean) title = "Switching";
     text(fonts.semibold, 32, 640, 359, kInkButton, title, Center);
     chamfer(x0, 395, w, 30, 8, rgb(0x1E110A));
@@ -364,10 +385,12 @@ static void screen_log(bool update) {
         row_rule(CX, CX + CW, y + 46);
     }
     y += 18;
-    bool online = *upd::kReleasePage != 0;
+    // (View Online: the release's own page on GitHub)
+    std::string page = update ? app.update.page : upd::release_page(upd::kVersion);
+    bool online = !page.empty();
     float total = (online ? 220 : 0) + (update ? 240 : 0) + (online && update ? 14 : 0), x = 640 - total * 0.5f;
     if (online) {
-        if (small_button("online", x, y, 220, 38, "View Online", false) && !app.preview) plat::open(upd::kReleasePage);
+        if (small_button("online", x, y, 220, 38, "View Online", false) && !app.preview) plat::open(page);
         x += 234;
     }
     if (update && small_button("logupgo", x, y, 240, 38, "Update", true)) start_update();
@@ -467,7 +490,7 @@ static void bottom_row() {
     }
     // Version: the changelog
     std::string v = upd::kVersionName;
-    if (app.update_ready) v += " \xC2\xB7 " + app.update.version + " ready";
+    if (app.update_ready && app.update.launcher) v += " \xC2\xB7 " + app.update.version + " ready";
     float vw = text_width(fonts.medium, 17, v);
     bool hv = false;
     if (hit("version", 1188 - vw, 604, vw, 22, true, &hv)) app.overlay = app.overlay == Overlay::Changelog ? Overlay::None : Overlay::Changelog;
@@ -544,8 +567,23 @@ static void tick() {
         // (the update drives its own build; the player's build stays as it was until the switch)
         upd::Progress u = upd::tick(app.cfg, app.build);
         app.update_stage = u.stage;
-        if (u.stage == upd::Stage::Done || u.stage == upd::Stage::Failed) {
-            say(u.stage == upd::Stage::Done ? "Updated to " + u.version : u.error.empty() ? "Update failed" : u.error);
+        if (u.stage == upd::Stage::Restart) {
+            // (the new launcher, from the files just put in place, in this one's stead: it builds the game again if needed)
+            // (with the environment this one was started with: the VR checks set XR_RUNTIME_JSON for their probe)
+            sys::vr_watch(false, app.cfg);
+            std::optional<std::string> xr = sys::inherited_runtime_json();
+            sys::Proc next = plat::spawn({u.restart, "--after-update"}, {{"XR_RUNTIME_JSON", xr}}, sys::parent(u.restart), plat::Out::Null);
+            if (next.ok()) {
+                plat::forget(next);
+                app.quit = true;
+            } else {
+                say("Restart HookshotVR");
+            }
+            app.update_ready = false, app.update_stage = upd::Stage::Idle;
+            app.screen = Screen::Main, app.build = sys::BuildState();
+            refresh();
+        } else if (u.stage == upd::Stage::Done || u.stage == upd::Stage::Failed) {
+            say(u.stage == upd::Stage::Done ? std::string("Updated to ") + upd::kVersionName : u.error.empty() ? "Update failed" : u.error);
             if (u.stage == upd::Stage::Done) app.update_ready = false;
             app.update_stage = upd::Stage::Idle;
             app.screen = Screen::Main;
@@ -563,7 +601,7 @@ static void tick() {
             refresh();
         }
     }
-    if (!app.update_ready && upd::available(&app.update)) app.update_ready = true;
+    if (!app.update_ready && !upd::running() && upd::available(&app.update)) app.update_ready = true;
     if (app.game.ok()) {
         int code = 0;
         if (sys::game_exited(app.game, &code)) {
@@ -576,6 +614,7 @@ static void tick() {
         app.vr_state = sys::vr_state();
         if (app.pending_play && !vr_waiting()) play();   // (Start With's app is up: the game now)
         if (app.auto_build && app.screen == Screen::Setup && overlay_free() && build_ready()) app.auto_build = false, start_build();
+        if (app.auto_update && app.update_ready && app.screen == Screen::Main && overlay_free()) app.auto_update = false, start_update();
         // (--play: once the screen is the main one and, in VR, the checks have answered and found the runtime and headset)
         if (app.auto_play && app.screen == Screen::Main && overlay_free() && !app.game.ok() &&
             (!app.vr || (app.vr_state.session != sys::Check::Unknown && !vr_waiting())))
@@ -609,7 +648,7 @@ static bool set_preview(const std::string &st) {
     } else if (st == "noruntime") {
         v.runtime = sys::Runtime(), v.session = sys::Check::Bad, v.headset = sys::Check::Unknown, v.none_installed = true;
     } else if (st == "update" || st == "updatelog") {
-        app.update_ready = true, app.update.version = "v0.2.0";
+        app.update_ready = true, app.update.version = "v1.1.0", app.update.page = upd::release_page("v1.1.0");
         app.update.changes = {"Per-eye fog in True stereo", "New VR menu", "Faster loading", "Fixed a crash after resizing the window"};
         if (st == "updatelog") app.overlay = Overlay::UpdateLog;
     } else if (st == "updating") {
@@ -735,6 +774,8 @@ int main(int argc, char **argv) {
         else if (a == "--no-art") no_art = true;
         else if (a == "--install") install = true;
         else if (a == "--build") app.auto_build = true;
+        else if (a == "--after-update") app.after_update = true;
+        else if (a == "--update") app.auto_update = true;
         else if (a == "--play") {
             app.auto_play = true;
             if (i + 1 < argc && (!strcmp(argv[i + 1], "vr") || !strcmp(argv[i + 1], "desktop"))) play_mode = argv[++i];
@@ -744,7 +785,7 @@ int main(int argc, char **argv) {
             app.fake_build = plat::real_path(next());   // (the builder runs in the repository's folder)
         }
         else if (a == "--help" || a == "-h") {
-            printf("hookshotvr-launcher [--build] [--play [vr|desktop]]\n"
+            printf("hookshotvr-launcher [--build] [--play [vr|desktop]] [--update]\n"
                    "hookshotvr-launcher [--state setup|building|ready|desktop|waiting|notrunning|noruntime|update|updating|settings|\n"
                    "                             changelog|updatelog]\n"
                    "                    [--screenshot <file.png> [--scale <n>]] [--art <folder> | --no-art] [--fake-build <script.py>]\n"
@@ -812,7 +853,16 @@ int main(int argc, char **argv) {
             sys::check_game_file(app.paths, app.cfg.game_file, app.fake_build);
         }
         if (!no_save && sys::collect_crashes(app.paths) > 0) say("Crash report saved");
-        if (!no_save) upd::tidy(app.paths, app.cfg), upd::check(app.cfg);
+        if (!no_save) {
+            upd::tidy(app.paths, app.cfg);
+            // (an update's rebuild still to do: the banner offers it, and right after the update it starts by itself)
+            if (upd::pending(app.paths, &app.update)) {
+                app.update.changes = app.changes, app.update_ready = true;
+                if (app.after_update) start_update();
+            }
+            if (app.after_update) say(std::string("Updated to ") + upd::kVersionName);
+            upd::check(app.paths, app.cfg);
+        }
     }
 
     if (!shot.empty()) {
