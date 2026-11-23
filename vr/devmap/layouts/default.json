@@ -1,0 +1,7 @@
+{
+ "format": 1,
+ "base": "DarkLinkStage",
+ "objects": [
+  {"id": "chest1", "actor": "Obj_TBox_A_01_NoBake", "position": [-80.0, 125.4, -71.0], "rotation": [0, 0, 0], "scale": [1, 1, 1]}
+ ]
+}

@@ -1,0 +1,13 @@
+#version 450
+// (OoT VR, vk_vr.cpp) the scene's depth, whatever its format, into an R32F copy for the headset: once the world is drawn
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D depth;
+layout(binding = 1, r32f) uniform writeonly image2D copy;
+layout(push_constant) uniform Push { uvec2 size; } pc;
+void main()
+{
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.size.x || p.y >= pc.size.y)
+        return;
+    imageStore(copy, ivec2(p), vec4(texelFetch(depth, ivec2(p), 0).r));
+}

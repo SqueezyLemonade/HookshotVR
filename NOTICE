@@ -1,0 +1,81 @@
+HookshotVR
+==========
+
+Unofficial. Not affiliated with Nintendo or the Hookshot project. Bring your own legally obtained copy of the game.
+
+HookshotVR contains no game files, and nothing made from them. It builds the game on your PC, from your own copy.
+"The Legend of Zelda" and "Ocarina of Time" are trademarks of Nintendo. Nothing here is endorsed by them.
+
+
+Licence
+-------
+
+HookshotVR is free software under the GNU General Public License, version 3 or later (see LICENSE), the same as
+Hookshot, which it is based on. It comes with no warranty.
+
+
+What changed (a VR fork of Hookshot)
+------------------------------------
+
+HookshotVR is a modified version of Hookshot (https://git.notrexed.dev/Hookshot/Hookshot), the static recompilation of
+the game by NotRexed and its contributors. It was made from Hookshot's source in November 2026. Hookshot's own code is
+still here, in its own folders, so its updates can be merged.
+
+What this fork adds or changes:
+
+  - vr/: everything for VR. The OpenXR session and the headset's frames; both eyes ("From depth" and "True stereo");
+    the head-driven camera; Link's body, hands and held items; sword, shield, bombs, bottles, bow, slingshot, boomerang,
+    hookshot, ocarina and the other items in the hands; the wrist HUD, the radial wheel and the VR menu; comfort options;
+    the Window view; cutscenes and Item Get views for VR.
+  - vr/launcher/: the HookshotVR Launcher, which builds the game with Hookshot's builder and starts it.
+  - assets/vr/: the art of the VR menu.
+  - Small changes ("VR HOOK" markers) in Hookshot's own files, so the renderer and the game can talk to the VR code.
+
+Every change is in this repository's history and marked in the files that were changed.
+
+
+Third-party parts we add
+------------------------
+
+  EB Garamond (the launcher's font)
+    The EB Garamond Project Authors. SIL Open Font License 1.1.
+    Files: vr/launcher/fonts/ (licence: vr/launcher/fonts/OFL.txt; where it came from: PROVENANCE.md there).
+
+  OpenXR headers
+    The Khronos Group Inc. Apache-2.0 or MIT.
+    Files: vr/third_party/openxr/.
+
+  OpenXR loader (openxr_loader.dll on Windows; on Linux libopenxr_loader.so.1)
+    The Khronos Group Inc. Apache-2.0 (https://github.com/KhronosGroup/OpenXR-SDK).
+    Loaded at run time, so the launcher and the game can find your VR runtime. The Windows download carries it beside
+    the launcher, unchanged; on Linux it is your system's.
+
+  Dear ImGui (the launcher's interface)
+    Omar Cornut and contributors. MIT.
+    Files: third_party/imgui/ (licence: LICENSE.txt there).
+
+  SDL2 (windows and controllers, loaded at run time)
+    Sam Lantinga and contributors. zlib licence.
+    Files: third_party/sdl2/ (licence: LICENSE.txt there).
+
+  libpng (the launcher's pictures, when it is built with it)
+    The PNG Reference Library Authors. libpng licence.
+
+The parts Hookshot itself carries (Eden and suyu code, Sirit, the Vulkan Memory Allocator, Opus, zstd, zbic, the
+Libertinus fonts, AMD FidelityFX and the others) keep their own notices in their folders, as Hookshot lists in
+docs/hookshot-readme.md ("License" and "Credits"). Hookshot's builder, which the release bundles at the version we build on, brings its
+own parts with their licence notices, inside its folder.
+
+The leather and copper frame (assets/vr/panel_frame.png) and the launcher's frame and wordmark are the project's own art.
+
+
+Thanks
+------
+
+  - NotRexed and everyone who works on Hookshot. HookshotVR stands on all of it.
+  - OcarinaVR by ReTracedGames (https://github.com/ReTracedGames/OcarinaVR, GPL-3.0). We looked at how it solved some
+    problems, and wrote our own code for ours. Where a part came out close to theirs, the file says so. Ideas we took:
+    the culling camera moved back, lifting and throwing in the hands, the warp's near tile map, rim fix and mirrored fill,
+    the 2D layer as its own quad, the curved cutscene screen, and closing the VR session with a time limit.
+  - BetterVR, for the put-away gesture, as OcarinaVR credits it.
+  - Khronos, for OpenXR; and the makers of WiVRn, Monado and SteamVR, which this was tested against.

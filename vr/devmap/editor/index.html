@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dev Map Editor</title>
+<link rel="stylesheet" href="/editor.css">
+<script type="importmap">
+{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+             "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<header id="toolbar">
+  <strong class="brand">Dev Map Editor</strong>
+  <label>Layout <select id="layoutSelect"></select></label>
+  <button id="newLayout" title="A new layout">New</button>
+  <button id="saveLayout" title="Save (Ctrl+S)">Save</button>
+  <button id="buildMap" class="primary" title="Save, then build the dev map's mod files">Build map</button>
+  <span class="sep"></span>
+  <label>Base <select id="baseSelect" title="The game map ours is cloned from: its floor, walls, light and collision"></select></label>
+  <span class="sep"></span>
+  <div class="seg" id="modeButtons">
+    <button data-mode="translate" class="on" title="Move (W)">Move</button>
+    <button data-mode="rotate" title="Rotate (E)">Rotate</button>
+    <button data-mode="scale" title="Scale (R)">Scale</button>
+  </div>
+  <label title="Snap: 0.5 m, 15 degrees, 0.25 scale"><input type="checkbox" id="snap" checked> Snap</label>
+  <label title="The game's own colour textures (else: colours by category)"><input type="checkbox" id="textures" checked> Textures</label>
+  <label title="The game's baked shading: corners, gaps and undersides darken as in the game"><input type="checkbox" id="baked" checked> Baked light</label>
+  <label title="The base map's own pieces">Base <select id="showBase"><option value="ghost">Ghost</option><option value="solid">Solid</option><option value="hidden">Hidden</option></select></label>
+  <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+  <button id="redo" title="Redo (Ctrl+Y)">Redo</button>
+  <span id="status"></span>
+</header>
+<main>
+  <aside id="palette">
+    <input id="search" type="search" placeholder="Search actors">
+    <div id="categories"></div>
+    <div id="paletteList"></div>
+    <p class="hint">Drag an actor into the view, or double-click it to place it in front of you.</p>
+  </aside>
+  <section id="viewport"><canvas id="canvas" tabindex="0"></canvas>
+    <div id="legend"></div>
+    <div id="help">Hold right: look + WASD fly, Q/E down/up, Shift fast, wheel speed · Arrows/PgUp/PgDn: fly · Wheel: move to cursor ·
+      Left drag: orbit · Middle drag: pan · Click: select · W/E/R: move/rotate/scale ·
+      Ctrl+D: duplicate · Del: delete · F: frame · Ctrl+Z / Ctrl+Y <span id="camSpeed">camera 8.0 m/s</span></div>
+  </section>
+  <aside id="side">
+    <h3>Placed <span id="count"></span></h3>
+    <div id="outliner"></div>
+    <h3>Marks <button id="refreshMarks" title="Places marked in the game with Menu + X">Load</button> <button id="clearMarks">Clear</button></h3>
+    <div id="marks" class="hint">In the VR test map, hold Menu and press X where you want something. Then Load: drop an actor on a pin.</div>
+    <h3>Properties</h3>
+    <div id="props"><p class="hint">Select something to see its properties.</p></div>
+  </aside>
+</main>
+<script type="module" src="/editor.js"></script>
+</body>
+</html>

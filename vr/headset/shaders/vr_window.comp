@@ -1,0 +1,183 @@
+#version 450
+// (OoT VR, vr/headset/window_view.inc) one eye's picture with the Window view's frame in it: the test scene behind it.
+//
+// Each pixel's ray leaves the eye along the eye's own view (its four FOV tangents, turned into the frame's axes by c0-c2);
+// where it crosses the frame's plane inside the frame it goes on into a shadow box behind the frame (a room
+// the frame's own width and height, kept from the frame's plane back to pc.box.x) holding a few blocks and a ball, near and
+// far, so leaning, crouching and stepping closer show more or less of them as through a real window. On the plane itself:
+// a light rim (the frame) and, inside it along the bottom, a black patch, a white patch and a round hole (alpha 0: what is
+// behind the layer shows through it) for checking the headset's composition. Outside the frame: alpha 0. Colours
+// premultiplied by alpha. (As a quad at the frame, RX_VR_WINDOW_LAYER=quad: c0-c2 the identity and the tangents the
+// off-axis view through the frame's corners, so every pixel lands inside it.)
+//
+// Coordinates: the frame's own, metres: x right, y up, z out of the frame toward the viewer; the frame's middle at 0.
+// Compile: glslangValidator -V --target-env vulkan1.2 --vn VR_WINDOW_COMP_SPV -o vr_window_comp_spv.h vr_window.comp
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D eye_out;
+
+layout(push_constant) uniform Push {
+    vec2 out_size;   // this eye's picture, pixels
+    vec2 half_size;  // the frame's half width and half height, metres
+    vec4 eye;        // xyz: the eye in the frame's coordinates (z > 0: in front); w: the x of this eye's picture in eye_out
+    vec4 tangent;    // the eye's view: its left, right, bottom and top edges' tangents at 1 m along its -z
+    vec4 box;        // x: the shadow box's depth (m); y: the rim's width (m); z: 1 the test patches; w: unused
+    vec4 c0, c1, c2; // xyz: the eye's x, y and z axes in the frame's coordinates
+    vec4 shape;      // x: the frame's roundness; y: its feather (m); z: Move mode (handles); w: the window's own fade
+} pc;
+
+// How far a point of the frame's plane is inside its shape (m; negative outside): its rectangle, or with round > 0 the
+// superellipse |x/a|^n + |y/b|^n = 1, n = 2 / round (window_view.inc window_inside)
+float inside(vec2 xy, vec2 hs, float round_)
+{
+    if (round_ <= 0.005) return min(hs.x - abs(xy.x), hs.y - abs(xy.y));
+    float n = 2.0 / min(round_, 1.0);
+    float s = pow(pow(abs(xy.x) / hs.x, n) + pow(abs(xy.y) / hs.y, n), 1.0 / n);
+    return (1.0 - s) * min(hs.x, hs.y);
+}
+
+// Move mode's handles over the frame (edit: 1 + the handle under a laser + 1, 0 none): 0-3 the corners, 4-7 the rounding
+// dots inside them (window_view.inc window_handle), and the shape's outline. A colour, or alpha 0 where none
+vec4 handles(vec2 xy, vec2 hs, float round_, float edit)
+{
+    if (edit < 0.5) return vec4(0);
+    int hot = int(edit + 0.5) - 2;
+    for (int i = 0; i < 8; i++) {
+        vec2 sgn = vec2((i & 3) == 1 || (i & 3) == 2 ? 1.0 : -1.0, (i & 3) < 2 ? 1.0 : -1.0);
+        float k = 1.0;
+        if (i >= 4) {   // (window_round_range: from 2 handles in, toward the ellipse's diagonal point as it rounds)
+            float k0 = max(0.3, 1.0 - 2.0 * 0.03 / max(0.05, min(hs.x, hs.y))), k1 = min(0.7071, k0 - 0.15);
+            k = k0 + (k1 - k0) * clamp(round_, 0.0, 1.0);
+        }
+        float r = length(xy - sgn * hs * k);
+        float size = i == hot ? 0.038 : 0.03;
+        if (r < size) return r > size - 0.006 ? vec4(0.2, 0.12, 0.05, 1)
+                                              : (i < 4 ? vec4(1.0, 0.95, 0.85, 1) : vec4(1.0, 0.7, 0.35, 1)) * (i == hot ? 1.0 : 0.85);
+    }
+    float d = inside(xy, hs, round_);
+    if (abs(d) < 0.004) return vec4(1.0, 0.9, 0.7, 1);
+    return vec4(0);
+}
+
+
+const vec3 kLight = normalize(vec3(-0.35, 0.8, 0.5));
+
+// A ray's nearest hit with an axis-aligned block (centre c, half size h) after t0; t (or 1e9) and the face's normal
+float block(vec3 o, vec3 d, vec3 c, vec3 h, float t0, out vec3 n)
+{
+    vec3 inv = 1.0 / d;
+    vec3 t1 = (c - h - o) * inv, t2 = (c + h - o) * inv;
+    vec3 tn = min(t1, t2), tf = max(t1, t2);
+    float a = max(max(tn.x, tn.y), tn.z), b = min(min(tf.x, tf.y), tf.z);
+    n = vec3(0);
+    if (b < a || a < t0) return 1e9;
+    n = a == tn.x ? vec3(-sign(d.x), 0, 0) : a == tn.y ? vec3(0, -sign(d.y), 0) : vec3(0, 0, -sign(d.z));
+    return a;
+}
+
+float ball(vec3 o, vec3 d, vec3 c, float r, float t0)
+{
+    vec3 oc = o - c;
+    float b = dot(oc, d), cc = dot(oc, oc) - r * r, dd = dot(d, d);
+    float disc = b * b - dd * cc;
+    if (disc < 0.0) return 1e9;
+    float t = (-b - sqrt(disc)) / dd;
+    return t < t0 ? 1e9 : t;
+}
+
+// Thin lines every `step` metres along a surface's two coordinates: 1 on a line, 0 between
+float grid(vec2 p, float step, float width)
+{
+    vec2 f = abs(fract(p / step + 0.5) - 0.5) * step;
+    return 1.0 - smoothstep(width * 0.5, width, min(f.x, f.y));
+}
+
+// The colour (linear) the ray from o along d sees behind the frame's plane (it crosses the plane inside the frame)
+vec3 behind(vec3 o, vec3 d)
+{
+    float t0 = o.z / -d.z;   // (where it crosses the plane)
+    vec2 hs = pc.half_size;
+    float depth = pc.box.x;
+    // the box's walls, from inside: the first one the ray reaches
+    float tx = d.x > 0.0 ? (hs.x - o.x) / d.x : d.x < 0.0 ? (-hs.x - o.x) / d.x : 1e9;
+    float ty = d.y > 0.0 ? (hs.y - o.y) / d.y : d.y < 0.0 ? (-hs.y - o.y) / d.y : 1e9;
+    float tz = (-depth - o.z) / d.z;
+    float t = min(min(tx, ty), tz);
+    vec3 n = t == tx ? vec3(-sign(d.x), 0, 0) : t == ty ? vec3(0, -sign(d.y), 0) : vec3(0, 0, 1);
+    int what = t == tz ? 0 : t == ty ? (d.y < 0.0 ? 1 : 2) : 3;   // (0 the back, 1 the floor, 2 the ceiling, 3 a side)
+    // the blocks and the ball (in the box's own measure: near the frame, middle, far)
+    vec3 bn;
+    float tb;
+    vec3 colour_obj = vec3(0);
+    bool obj = false;
+    tb = block(o, d, vec3(-0.6 * hs.x, -hs.y + 0.07, -0.25), vec3(0.07), t0, bn);
+    if (tb < t) t = tb, n = bn, obj = true, colour_obj = vec3(0.85, 0.25, 0.18);
+    tb = block(o, d, vec3(0.45 * hs.x, -hs.y + 0.15, -0.75), vec3(0.11, 0.15, 0.11), t0, bn);
+    if (tb < t) t = tb, n = bn, obj = true, colour_obj = vec3(0.2, 0.55, 0.85);
+    tb = block(o, d, vec3(-0.1 * hs.x, 0.25 * hs.y, -0.55), vec3(0.05), t0, bn);
+    if (tb < t) t = tb, n = bn, obj = true, colour_obj = vec3(0.95, 0.8, 0.2);
+    const vec3 bc = vec3(0.15 * hs.x, -0.45 * hs.y, -0.12);
+    tb = ball(o, d, bc, 0.05, t0);
+    if (tb < t) t = tb, n = normalize(o + d * tb - bc), obj = true, colour_obj = vec3(0.3, 0.8, 0.35);
+    vec3 p = o + d * t;
+    vec3 base;
+    if (obj) {
+        base = colour_obj;
+    } else if (what == 0) {   // the back: a checker of 10 cm
+        vec2 c = floor(p.xy / 0.1);
+        base = mod(c.x + c.y, 2.0) < 1.0 ? vec3(0.75, 0.72, 0.66) : vec3(0.35, 0.33, 0.3);
+    } else {                  // the walls, floor and ceiling: a grid of 10 cm
+        vec2 q = what == 3 ? p.zy : p.xz;
+        vec3 wall = what == 1 ? vec3(0.45, 0.32, 0.2) : what == 2 ? vec3(0.55, 0.55, 0.58) : vec3(0.5, 0.42, 0.34);
+        base = mix(wall, vec3(0.08), grid(q, 0.1, 0.004 * (1.0 + t)));
+    }
+    float lit = 0.35 + 0.65 * max(dot(n, kLight), 0.0);
+    float far = clamp(-p.z / depth, 0.0, 1.0);   // (a little darker further back: depth at a glance)
+    return base * lit * (1.0 - 0.45 * far);
+}
+
+// The premultiplied colour at a point of the frame's plane (x, y), the eye at o
+vec4 at_plane(vec2 xy, vec3 o)
+{
+    vec2 hs = pc.half_size;
+    float rim = pc.box.y;
+    vec4 handle = handles(xy, hs, pc.shape.x, pc.shape.z);
+    if (handle.a > 0.0) return handle;
+    float in_ = inside(xy, hs, pc.shape.x);   // (how far inside the shape)
+    float a = pc.shape.y > 0.0 ? clamp(in_ / pc.shape.y, 0.0, 1.0) : (in_ >= 0.0 ? 1.0 : 0.0);
+    if (a <= 0.0) return vec4(0);
+    if (in_ < rim) return vec4(vec3(0.92, 0.9, 0.85) * a, a);   // the frame
+    if (pc.box.z > 0.5) {   // the test patches along the bottom: black, white, a hole
+        vec2 at = xy - vec2(0, -hs.y + rim + 0.05);
+        if (abs(at.y) < 0.03) {
+            if (abs(at.x + 0.25 * hs.x) < 0.03) return vec4(0, 0, 0, 1);
+            if (abs(at.x - 0.25 * hs.x) < 0.03) return vec4(1, 1, 1, 1);
+        }
+        if (length(at) < 0.03) return vec4(0);
+    }
+    vec3 d = vec3(xy, 0) - o;
+    return vec4(behind(o, d) * a, a);
+}
+
+void main()
+{
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(pc.out_size.x) || px.y >= int(pc.out_size.y)) return;
+    vec4 sum = vec4(0);
+    // (four rays a pixel: the grid's lines and the blocks' edges without crawling as the head moves)
+    for (int s = 0; s < 4; s++) {
+        vec2 uv = (vec2(px) + vec2(0.25 + 0.5 * float(s & 1), 0.25 + 0.5 * float(s >> 1))) / pc.out_size;
+        // the ray: its direction in the eye's view at 1 m along -z, turned into the frame's axes; where it crosses the plane
+        vec2 tan_xy = vec2(mix(pc.tangent.x, pc.tangent.y, uv.x), mix(pc.tangent.w, pc.tangent.z, uv.y));
+        vec3 d = pc.c0.xyz * tan_xy.x + pc.c1.xyz * tan_xy.y - pc.c2.xyz;
+        vec3 o = pc.eye.xyz;
+        if (o.z <= 0.0 || d.z >= -1e-6) continue;   // (away from the plane: nothing)
+        vec2 xy = o.xy + d.xy * (o.z / -d.z);
+        if (any(greaterThan(abs(xy), pc.half_size + 0.05))) continue;   // (beside the frame and its handles: nothing)
+        sum += at_plane(xy, o);
+    }
+    vec4 c = sum * 0.25;
+    // (display-encoded, as the game's picture is: the eyes' swapchain is RGBA8 sRGB where the runtime offers it)
+    vec3 shown = c.a > 0.0 ? pow(c.rgb / c.a, vec3(1.0 / 2.2)) * c.a : vec3(0);
+    imageStore(eye_out, px + ivec2(int(pc.eye.w), 0), vec4(shown, c.a) * pc.shape.w);
+}

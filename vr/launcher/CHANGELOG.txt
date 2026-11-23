@@ -1,0 +1,14 @@
+v1.0.0
+Alpha v1.0.0: the first public release
+Sword combat with both hands, the shield, Deku Sticks
+Bombs, bottles, bow, slingshot, boomerang and hookshot
+Wrist HUD, item wheel and third-person aim
+Item gets and cutscenes in VR, the Window view (beta)
+Comfort options, and the launcher with any OpenXR runtime
+
+v0.1.0
+First release
+Desktop and VR modes
+VR settings menu
+Swords, bombs, Boomerang, ocarina, bottles
+Thanks to OcarinaVR by ReTracedGames for its culling camera approach

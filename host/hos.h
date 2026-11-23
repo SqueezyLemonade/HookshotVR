@@ -1,0 +1,288 @@
+/* Horizon OS layer (HLE of the Nintendo SDK at the nn:: boundary) for a64-kit games.
+
+   An import or SDK function the game calls is a C function `void imp_<mangled name>(Ctx *c)` (HLE(...) below):
+   arguments in c->x[0..7], the result in c->x[0]. A symbol with such a definition is hooked both where the game
+   imports it and at the sdk's own definition, so lifted SDK code reaching it lands here too (nx_image.py).
+   Everything without a definition gets a generated stub that logs its first call and returns 0.
+
+   Guest address map (mkw-recomp: the 64-bit window of a 39-bit process, reserved whole and committed as used):
+     0x01000000 - 0x07000000      system region: our own guest objects (main stack, TLS blocks, thread regions)
+     0x80000000 - image end       rtld, main, subsdk0, subsdk1, sdk in Eden's layout (hos_image_base, the lift's)
+     0x1000000000 - ...           heap (SetMemoryHeapSize), up from 64 GB
+     ... - 0x8000000000           address regions (AllocateAddressRegion), down from 512 GB */
+#ifndef HOS_H
+#define HOS_H
+#include "a64.h"
+#include <stdarg.h>
+#include <stddef.h>
+
+/* HOS_HLE_STATS=1 (off by default): each HLE function counts its calls, and hos_hostcall.c logs every 5 s how often each
+   ran. Off, a call costs a test of the switch and a branch more: the counted arm is a tail call, so the function saves
+   no registers for it and the body stays inlined in the other. */
+typedef struct HleCount { const char *name; volatile long calls, listed; long before; struct HleCount *next; } HleCount;
+extern int hos_hle_stats;
+void hos_hle_counted(HleCount *h, void (*fn)(Ctx *c), Ctx *c);
+#define HLE(sym) \
+    static void hle_##sym(Ctx *c); \
+    void imp_##sym(Ctx *c) { \
+        static HleCount h = {#sym}; \
+        if (hos_hle_stats) hos_hle_counted(&h, hle_##sym, c); \
+        else hle_##sym(c); \
+    } \
+    static void hle_##sym(Ctx *c)
+/* HOS_GAME_VERSION: the game update the address hooks below are for, from the build (build.py reads the main
+   module's build id). An update moves the game's functions, so a hook compiles the address of the version it is
+   for and the other version's hooks are left out (ENTRY_HOOKs: the address is not in the lift; SPLICE_AFTERs:
+   skipped with a note). */
+#ifndef HOS_GAME_VERSION
+#define HOS_GAME_VERSION 100
+#endif
+/* ENTRY_HOOK(0x0xxxxxxx) { ... }: runs at the entry of the lifted guest function at that address (8 hex digits),
+   with its arguments in c; return 1 when it handled the call (the function then returns at once, x0 is the result),
+   0 to run the function as usual. (mkw-recomp's build.py spliced these in; Hookshot's lift does not, so one defined here
+   would never run. ENTRY_HOOK_SYM below is spliced.) */
+#define ENTRY_HOOK(addr) int entry_##addr(Ctx *c)
+/* ENTRY_HOOK_SYM(sym) { ... }: the same at the entry of the SDK's definition of the symbol (found in the image's symbol table),
+   spliced in by the standalone lift (nx2/entry_hooks.py; a new one lifts again) */
+#define ENTRY_HOOK_SYM(sym) int entry_sym_##sym(Ctx *c)
+/* ENTRY_HOOK_SYM_FROM(sym, min) { ... }: the same, called only when x2 (the size argument) is min or more: the spliced line
+   tests it, so smaller calls stay in the lifted code without a call (the hook declines them too) */
+#define ENTRY_HOOK_SYM_FROM(sym, min) int entry_sym_##sym(Ctx *c)
+/* SPLICE_AFTER(0x0xxxxxxx, "text") { ... }: runs inside the lifted guest function at that address, right after the
+   first line of its lifted C that contains the text (a game patch in the middle of a function: c holds the guest
+   registers there). build.py splices the call in and stops the build if the text is not found. One per function. */
+#define SPLICE_AFTER(addr, anchor) void splice_##addr(Ctx *c)
+/* SPLICE_AFTER_EACH(0x0xxxxxxx, "text") { ... }: the same after every line of that function with the text */
+#define SPLICE_AFTER_EACH(addr, anchor) void splice_##addr(Ctx *c)
+#define ARG(n) (c->x[n])
+#define RET(v) (c->x[0] = (uint64_t)(v))
+#define GP(a) ((void *)A64_PTR(a))           /* host pointer of a guest address */
+#define G64(a) (*(uint64_t *)GP(a))
+#define G32(a) (*(uint32_t *)GP(a))
+
+#define HOS_SYSTEM_BASE 0x01000000ULL
+#define HOS_SYSTEM_END 0x07000000ULL
+#define HOS_HEAP_BASE 0x1000000000ULL
+#define HOS_GUEST_SPACE (1ULL << 39)
+extern const uint64_t hos_image_base, hos_image_end;
+int hos_mem_region(uint64_t addr, uint64_t size);   /* (hos_mem.c) 0 if not wholly in mapped guest memory */   /* (gen/hos_image.c) */
+extern const uint64_t hos_program_id;                  /* (gen/hos_image.c: main.npdm's) */
+extern const char hos_main_build_id[];                 /* (gen/hos_image.c: main's NSO build id, hex) */
+/* (oot-recomp) MKW's own hooks at fixed guest addresses (its frame pacer in nvn_native.c / nn_vi.c, its idle loop in
+   hos_thread.c) run only when the lifted main is Mario Kart World's: any other game has other code there */
+int hos_game_is_mkw(void);
+#define HOS_GAME_TITLE "Hookshot"
+uint64_t hos_used_memory(uint64_t base);   /* (hos_mem.c) base + heap + the game's mapped pages: the used memory it is told */
+int hos_commit(uint64_t addr, uint64_t size);          /* (mkw_glue.c) guest pages made usable by host APIs: 1, or 0 if refused */
+/* (mkw_glue.c) host memory the game cannot go on without: never NULL (but for 0 bytes). At the commit limit a failed
+   allocation is tried again for up to 5 s, as a guest commit is; then the out-of-memory line and notice, and the game stops.
+   what names it in the log. hos_out_of_memory: that line and notice, once a run (wait: shown here, or waited for, before the
+   caller stops the game) */
+void *hos_xmalloc(size_t size, const char *what);
+void *hos_xcalloc(size_t count, size_t size, const char *what);
+void *hos_xrealloc(void *old, size_t size, const char *what);
+void hos_out_of_memory(int wait);
+/* (mkw_glue.c) the end of hos_alloc_failed's wait: the line, the notice and the stop (n 0: the size not known, as for
+   the renderer's C++ allocations, MkwVkHost out_of_memory). Does not return */
+void hos_alloc_gave_up(size_t n, const char *what);
+int hos_mem_region(uint64_t addr, uint64_t size);      /* (hos_mem.c) the control bridge: 0 if not wholly in mapped guest memory */
+/* (Hookshot) 1: the heap and the address regions are reserved when the game asks for them and committed where they are
+   first touched (mkw_glue.c commit_on_touch), instead of whole. A system call given a guest buffer needs hos_commit on
+   it first: the kernel does not come through the handler. HOS_LAZY_COMMIT=0: committed whole, as before */
+int hos_lazy_commit(void);
+/* (Hookshot) hos_memsplit.c keeps the list of NVN memory pools with storage in guest memory: the ranges [lo, hi) of
+   those with one of the flags given (flags NULL: every pool) that were made before `made_before_ns` (hos_now_ns), sorted,
+   those that touch merged; 1 while HOS_POOL_TRAP has pages NOACCESS. hl_mem.c (HL_MEM_COLD) is told of pools made and of
+   the back end's imports. hos_thread.c: the guest threads' and fibers' stacks as {start, end}. */
+int hos_pools_with_flags(const uint32_t *flags, int nflags, int64_t made_before_ns, uint64_t (*out)[2], int cap);
+int hos_pool_trap_active(void);
+int hos_guest_stacks(uint64_t (*out)[2], int max);
+void hl_mem_pool_made(uint64_t addr, uint64_t size);
+void hl_mem_imported(uint64_t lo, uint64_t hi);
+void hl_mem_unimported(uint64_t lo, uint64_t hi);
+void hl_mem_init(void);
+/* (hl_drop.c, HL_MEM_DROP) the drop module: started after the memory module; told of decodes, of guest memory handed to
+   the kernel (hos_commit) and of the back end's imports */
+void hl_drop_init(void);
+void hl_drop_decode(uint64_t dest, uint64_t size, uint64_t compressed, uint32_t dict_id, const char *name);
+void hl_drop_kernel_begin(uint64_t lo, uint64_t hi);
+void hl_drop_kernel_end(void);
+void hl_drop_import(uint64_t lo, uint64_t hi);
+void hl_drop_import_end(void);
+void hl_drop_unimport(uint64_t lo, uint64_t hi);
+void hl_drop_pool_gone(uint64_t lo, uint64_t hi);
+#if defined(A64_WRITE_TRACK) && !defined(__EMSCRIPTEN__)
+void hos_mark_written(const void *p, size_t n);   /* (hos_mem.c: guest memory written by host code, native soft watch) */
+#define HOS_WRITTEN(p, n) hos_mark_written((p), (n))
+#elif defined(A64_WRITE_TRACK)
+void web_mark_written(const void *p, size_t n);   /* (hos/web/win32.c: guest memory written by host code) */
+#define HOS_WRITTEN(p, n) web_mark_written((p), (n))
+#else
+#define HOS_WRITTEN(p, n) ((void)0)
+#endif
+#ifdef A64_MEM_ZERO
+extern uint64_t hos_space_end;   /* web: the guest window ends where the host's own data starts (hos_main.c) */
+#define HOS_SPACE_END hos_space_end
+#else
+#define HOS_SPACE_END 0x8000000000ULL
+#endif
+/* (hookshot) host pointer of the n guest bytes at a, NULL unless all of them lie in the guest window. For addresses
+   and sizes host code takes from guest memory or arguments before it reads or writes there: GP alone wraps around
+   to any host address. */
+static inline void *hos_guest_range(uint64_t a, uint64_t n) {
+    return a < (uint64_t)HOS_SPACE_END && n <= (uint64_t)HOS_SPACE_END - a ? GP(a) : (void *)0;
+}
+#define HOS_TICK_HZ 31250000ULL   /* (mkw-recomp: the Switch 2 counter; the SDK checks it at init) */
+
+/* ---- logging: HOS_TRACE=1 logs every HLE call that uses HOS_TRACE_CALL. hos_log is info; hos_log_at gives a line another level,
+   written after the thread's tag ("[hos host] [trace] vk: ..."), for the launcher's log to show or leave out (docs/development.md) */
+enum { HOS_LOG_ERROR, HOS_LOG_WARN, HOS_LOG_INFO, HOS_LOG_DEBUG, HOS_LOG_TRACE };
+extern int hos_trace;
+void hos_log(const char *fmt, ...);
+void hos_log_at(int level, const char *fmt, ...);
+void hos_log_flush(void);
+/* (hookshot) the slow-frame recorder (host/slow_frames.c, HOS_SLOW_FRAMES): its path (NULL: off), the sampler's interval, a
+   present (rx_nvn_present), a sample and a sweep's end (the all-thread samplers) */
+const char *hos_slow_frames_path(void);
+int hos_slow_frames_every_ms(void);
+void hos_slow_frame_present(void);
+void hos_slow_sample(int64_t sweep_ns, const char *text);
+void hos_slow_sweep_done(void);
+/* (hookshot) an A/B within one run (host/hos_ab.c, HOS_AB=<switch>=<value>[,<seconds>[,<warm-up seconds>]]): the side now,
+   -1 when no A/B runs or in its warm-up, else 0 (the switch's normal value) or 1 (the A/B's value): one relaxed load, cheap
+   enough for a per-call path. A switch's reader takes the A/B as v = hos_ab_value(<its name, a literal>, v_normal): v_normal
+   unless the A/B names that switch and side 1 runs. Both sides pay the same for the call (a load, then a look at a small
+   table of the names seen, by address), so the measured difference is the switch's. hos_ab_frame: the side of a frame from
+   from_ns to to_ns (hos_now_ns), + 2 in a transition (a flip in the frame, or less than 0.3 s before its end), -1 outside */
+extern int hos_ab_side_now;
+static inline int hos_ab_side(void) { return __atomic_load_n(&hos_ab_side_now, __ATOMIC_RELAXED); }
+int hos_ab_value_at(const char *name, int normal, int side);
+static inline int hos_ab_value(const char *name, int normal) {
+    const int side = hos_ab_side();
+    return side < 0 ? normal : hos_ab_value_at(name, normal, side);
+}
+int hos_ab_frame(int64_t from_ns, int64_t to_ns);
+void hos_ab_start(void);     /* (hos_main.c, before the game's threads) */
+void hos_ab_present(void);   /* (rx_nvn_present: the host's per-side sums) */
+void hos_ab_end(void);       /* (hos_close_finish: their line in the log) */
+/* (hookshot) the profiling mode (host/profiling.c, HOS_PROFILE=1): its folder (NULL: off), its switches set (after
+   hookshot_env.txt), its threads started (hos_prof_start), a timed event into its events.txt, and a sampler's line written
+   (packed with HOS_SAMPLE_PACKED) */
+const char *hos_profiling_dir(void);
+void hos_profiling_env(void);
+void hos_profiling_start(void);
+void hos_profiling_event(const char *fmt, ...);
+void hos_sample_write(void *file, const char *line);   /* (a FILE *: hos.h reads no stdio.h) */
+#define HOS_TRACE_CALL(name) do { if (hos_trace) hos_log_at(HOS_LOG_TRACE, "%s(%#llx, %#llx, %#llx, %#llx) lr %#llx", name, \
+    (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[2], \
+    (unsigned long long)c->x[3], (unsigned long long)c->x[30]); } while (0)
+void hos_fatal(Ctx *c, const char *fmt, ...);
+
+/* ---- guest memory (hos_mem.c) */
+uint64_t hos_sys_alloc(uint64_t size, uint64_t align);     /* zeroed, from the system region, never freed */
+uint64_t hos_region_alloc(uint64_t size, uint64_t align);  /* address space above the heap */
+void hos_region_free(uint64_t addr);
+int hos_regions(uint64_t (*out)[2], int cap);   /* the regions: {start, end}, at most cap; how many */
+int hos_regions_above(uint64_t from, uint64_t (*out)[2], int max);   /* address regions from `from` up, ascending */
+void hos_mem_init(uint64_t image_end);
+extern uint64_t hos_heap_size, hos_heap_used, hos_total_memory, hos_program_size;
+
+/* ---- threads (hos_thread.c) */
+typedef struct HosThread HosThread;
+HosThread *hos_self(void);
+Ctx *hos_ctx(void);
+uint64_t hos_thread_guest(HosThread *t);                   /* its nn::os::ThreadType in guest memory */
+uint64_t hos_thread_id(HosThread *t);
+HosThread *hos_thread_of(uint64_t guest_thread_type);      /* NULL if unknown */
+HosThread *hos_thread_create(uint64_t guest_tt, uint64_t entry, uint64_t arg, uint64_t stack, uint64_t stack_size,
+                             int priority, int core);
+void hos_thread_start(HosThread *t);
+void hos_thread_join(HosThread *t);
+void hos_thread_destroy(HosThread *t);
+void hos_thread_set_name(HosThread *t, const char *name);
+void hos_thread_pin(void *h, const char *name);   /* HOS_PIN: host CPU affinity by thread name */
+int hos_game_cores(void);   /* totk_cores.c: HOS_GAME_CORES, or 0 */
+const char *hos_thread_name(HosThread *t);
+int hos_thread_serial(const HosThread *t);   /* one of the frame's serial threads (game thread, Presentation Thread) */
+int64_t hos_spin_ns(void);   /* the calling thread's spin before a wait sleeps, ns (HOS_SPIN_US, HOS_SPIN_OTHER_US) */
+void hos_thread_affinity(HosThread *t, int ideal, uint64_t mask);
+uint64_t hos_thread_mask(HosThread *t);
+int hos_thread_priority(HosThread *t, int set, int value);
+int hos_thread_core(HosThread *t);
+int hos_cores(void);
+/* virtual cores (hos_thread.c, HOS_VCORES=1): a guest thread gives its core up for a block (hos_vcore_away: 1 if it
+   held one, or ran without one since an escape) and takes one again after it (hos_vcore_back); checkpoints hand it to a
+   better waiter that asked */
+int hos_vcores_on(void);
+int hos_vcore_away(void);
+void hos_vcore_back(void);
+void hos_vcore_back_first(void);   /* (after the replay: hos_thread.c) */
+void hos_vcore_checkpoint(void);
+/* HOS_CHAIN=<path> (hos_chain.c, diagnostic): blocks, wake-ups, sleeps and presents of the guest threads for
+   scripts/chain.py's critical path. kind: a wait that blocks begins / ends, a signal that can end one, a sleep begins /
+   ends, a present. lr 0: the current guest context's. */
+enum { HOS_CHAIN_WAIT = 1, HOS_CHAIN_WOKE, HOS_CHAIN_SIGNAL, HOS_CHAIN_SLEEP, HOS_CHAIN_AWAKE, HOS_CHAIN_PRESENT };
+extern volatile int hos_chain_on;
+void hos_chain_note(int kind, uint64_t key, uint64_t lr);
+#define HOS_CHAIN(kind, key) do { if (__builtin_expect(hos_chain_on, 0)) hos_chain_note((kind), (key), 0); } while (0)
+void hos_vcore_yield(void);
+int hos_cv_sleep(void *cv, void *srw_lock, unsigned ms);   /* SleepConditionVariableSRW (exclusive) for guest threads */
+void hos_thread_boost(int level);
+void hos_thread_stack(HosThread *t, uint64_t *addr, uint64_t *size);
+uint64_t *hos_tls_slots(HosThread *t);                     /* nn::os TLS slot values */
+#define HOS_TLS_SLOTS 32
+Ctx *hos_boot_main_thread(uint64_t stack_size);           /* the calling host thread becomes the guest main thread */
+/* the kernel side: Horizon handles and blocking for hos_svc.c's arbitration */
+uint32_t hos_thread_handle(HosThread *t);
+HosThread *hos_thread_by_handle(uint32_t h);
+int hos_thread_prio(HosThread *t);
+void hos_thread_wait(HosThread *t, int64_t timeout_ns, int *timed_out);   /* < 0: forever */
+void hos_thread_wake(HosThread *t);
+
+/* ---- for host-side devices: game files by guest path (nn_fs.c), guest events (nn_os_sync.c) */
+int hos_fs_host_path(const char *guest, char *out, size_t cap);
+void hos_event_signal(uint64_t guest_event);
+
+/* ---- videos (movie_mf.c): a video file read as compressed samples or as decoded NV12 frames */
+typedef struct MovieReader MovieReader;
+MovieReader *movie_reader_open(const char *host_path, int decoded, int *width, int *height, int64_t *duration_us);
+/* compressed: the next sample into dst; its size, 0 at the end, -1 on an error or if it does not fit */
+int movie_reader_sample(MovieReader *r, void *dst, int cap, int64_t *time_us);
+/* decoded: the next frame as NV12 (width x height luma rows of `width` bytes, then the interleaved chroma rows);
+   1, or 0 at the end */
+int movie_reader_frame(MovieReader *r, uint8_t *dst, int64_t *time_us);
+void movie_reader_close(MovieReader *r);
+uint32_t movie_reader_codec(MovieReader *r);   /* the stream's FourCC: 'VP90', 'VP80', 'H264', ... */
+
+/* ---- time */
+uint64_t hos_ticks(void);
+void hos_sleep_ns(int64_t ns);
+int64_t hos_now_ns(void);
+
+/* ---- (HOS_HOST_SPLIT, hos_hostsplit.c) a range this engine made, named for the census of the process's memory outside the guest window
+   (one load and a branch with the switch off); the Vulkan back end finds both by name in the executable */
+void hos_mem_tag(const void *ptr, uint64_t size, const char *name);
+void hos_mem_untag(const void *ptr);
+
+/* ---- (TICK-039) HOS_JOBTRACE=<path>: blocking and waking of every thread for a short window (hos_jobtrace.c) */
+extern volatile int hos_jt_on;
+void hos_jt_rec(int type, uint64_t a, uint64_t b);
+uint64_t hos_jt_lr(void);
+void hos_jt_start(void);
+enum {
+    JT_EV_WAIT_B = 1, JT_EV_WAIT_E, JT_EV_SIGNAL, JT_SPIN_E,   /* event (a key, b lr | b how: 0 ready 1 spun 2 slept, +4 timed out) */
+    JT_CV_WAIT_B, JT_CV_WAIT_E, JT_CV_SIGNAL,                  /* condition variable (a cv; signal b: count, 0 all) */
+    JT_MX_WAIT_B, JT_MX_WAIT_E, JT_MX_GIVE,                    /* contended mutex (a mutex; give: when a thread sleeps on it) */
+    JT_SLEEP_B, JT_SLEEP_E,                                    /* SleepThread (a ns asked, b lr) */
+    JT_VC_WAIT_B, JT_VC_WAIT_E,                                /* a wait for a virtual core */
+    JT_Q_WAIT_B, JT_Q_WAIT_E, JT_Q_SIGNAL,                     /* message queue / semaphore (a object) */
+    JT_K_WAIT_B, JT_K_WAIT_E, JT_K_WAKE,                       /* kernel wait (a address, b lr) / wake (a the HosThread woken) */
+    JT_MARK,                                                    /* free use (a, b) */
+    JT_JOB_B, JT_JOB_E                                          /* (TICK-042) a job run by the dispatcher f_8004ab40 (a the job
+                                                                   object x0, b target | call site << 32), with a diagnostic lift */
+};
+/* (TICK-042) the job marks: called around f_8004ab40's indirect calls in a diagnostic build only (the patched lifted C); one
+   load and a branch outside the trace window */
+void hos_jt_job(uint64_t obj, uint64_t target, uint64_t site, int begin);
+#define HOS_JT(t, a, b) do { if (__builtin_expect(hos_jt_on, 0)) hos_jt_rec((t), (uint64_t)(a), (uint64_t)(b)); } while (0)
+#endif

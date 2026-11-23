@@ -1,0 +1,120 @@
+#version 450
+// (OoT VR, vk_vr.cpp) one eye from the game's picture and its scene depth.
+//
+// When the eye moves sideways by offset, a point at view distance z moves on screen by shift = k / z along one direction (k from
+// the projection and the offset). Each output pixel searches back along that direction for the source point whose own shift
+// lands it here; marching from the far end, the first proper match is the nearest surface, the one seen. Where a near edge
+// leaves a gap (the moved eye sees behind it, which the game never drew), the gap is filled from the background side.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D picture;     // the game's picture
+layout(binding = 1) uniform sampler2D scene_depth; // its scene depth (R32F copy), the same view
+layout(binding = 2, rgba8) uniform writeonly image2D eye_out;
+
+layout(push_constant) uniform Push {
+    vec2 out_size;   // this eye's image, pixels
+    vec2 uv_scale;   // output uv to picture uv
+    vec4 proj;       // |P00|, |P11|, -a, b: a depth d is at view distance b / (d - a)
+    vec4 offset;     // the eye's offset from where the game drew: x right, y up, z back (metres); w 1: the general warp
+    float steps;     // search samples
+    float max_shift; // largest shift, in uv
+    float near;      // the camera's near distance
+    float debug;     // 1 = show the depth instead
+} pc;
+
+float distance_at(vec2 uv)
+{
+    float d = texture(scene_depth, uv).r;
+    float den = d + pc.proj.z;
+    if (abs(den) < 1e-9)
+        return 1e9; // the sky
+    float z = pc.proj.w / den;
+    return z > 0.0 ? max(z, pc.near) : 1e9;
+}
+
+// (general warp, offset.w = 1: the eye moved by offset.xyz in any direction, z included, as alternate eyes need when Link walked
+// between the two eyes' frames) Where the source point at uv, at its view distance, lands for the moved eye.
+vec2 moved(vec2 uv, out float z)
+{
+    z = distance_at(uv);
+    vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    vec3 x = vec3(ndc.x * z / pc.proj.x, ndc.y * z / pc.proj.y, -z) - pc.offset.xyz;
+    float z2 = max(-x.z, pc.near);
+    vec2 n2 = vec2(x.x * pc.proj.x, x.y * pc.proj.y) / z2;
+    return vec2(n2.x + 1.0, 1.0 - n2.y) * 0.5;
+}
+
+// Each output pixel q: the source point s that lands on it, found by fixed-point steps (s += q - moved(s)) from three starts
+// along the flow. A start that converges onto a surface is a match, and the nearest match is the one seen. With none (the
+// moved eye sees behind a near edge, which the game never drew), the farthest result: the gap filled from the background.
+vec2 general_source(vec2 q)
+{
+    float z;
+    vec2 flow = moved(q, z) - q;
+    vec2 best = q, fill = q;
+    float best_z = 1e30, fill_z = -1.0;
+    for (int start = 0; start < 3; start++) {
+        vec2 s = q - flow * float(start);
+        for (int i = 0; i < 8; i++)
+            s = clamp(s + (q - moved(s, z)), vec2(0.0), pc.uv_scale);
+        vec2 err = (moved(s, z) - q) * pc.out_size;
+        if (dot(err, err) < 2.25 && z < best_z) best_z = z, best = s;
+        if (z > fill_z) fill_z = z, fill = s;
+    }
+    return best_z < 1e29 ? best : fill;
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.out_size.x) || p.y >= int(pc.out_size.y))
+        return;
+    vec2 uv = (vec2(p) + 0.5) / pc.out_size * pc.uv_scale;
+
+    if (pc.debug > 0.5) {
+        float z = distance_at(uv);
+        float v = 1.0 / (1.0 + z * 0.25);
+        imageStore(eye_out, p, vec4(v, v, v, 1.0));
+        return;
+    }
+
+    if (pc.offset.w > 0.5) {
+        imageStore(eye_out, p, texture(picture, general_source(uv)));
+        return;
+    }
+
+    vec2 per_inv_z = vec2(-pc.proj.x * pc.offset.x, pc.proj.y * pc.offset.y) * 0.5;
+    float k = length(per_inv_z);
+    if (k < 1e-7) {
+        imageStore(eye_out, p, texture(picture, uv));
+        return;
+    }
+    vec2 dir = per_inv_z / k;
+    float tmax = min(pc.max_shift, k / pc.near);
+    int n = max(int(pc.steps), 4);
+    float dt = tmax / float(n);
+
+    float t_prev = tmax;
+    float s_prev = min(k / distance_at(clamp(uv - dir * tmax, vec2(0.0), pc.uv_scale)), tmax);
+    float g_prev = s_prev - t_prev;
+    float found = -1.0, fill = -1.0;
+    for (int i = n - 1; i >= 0; i--) {
+        float t = dt * float(i);
+        float s = min(k / distance_at(clamp(uv - dir * t, vec2(0.0), pc.uv_scale)), tmax);
+        float g = s - t;
+        if (g_prev < 0.0 && g >= 0.0) {
+            if (abs(s - s_prev) <= 1.5 * dt) {
+                found = mix(t_prev, t, g_prev / (g_prev - g));
+                break;
+            }
+            if (fill < 0.0)
+                fill = t_prev;
+        }
+        t_prev = t;
+        s_prev = s;
+        g_prev = g;
+    }
+    float t = found >= 0.0 ? found : fill >= 0.0 ? fill : 0.0;
+    vec2 src = clamp(uv - dir * t, vec2(0.0), pc.uv_scale);
+    imageStore(eye_out, p, texture(picture, src));
+}

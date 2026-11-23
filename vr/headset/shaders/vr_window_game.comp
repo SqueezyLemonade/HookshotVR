@@ -1,0 +1,105 @@
+#version 450
+// (OoT VR, vr/headset/window_view.inc) one eye's view with the Window view's frame in it, showing the part of the game's
+// own picture for that eye (True stereo's, or the one picture, or a flat frame's) that window_crop / window_fit found.
+//
+// Each pixel's ray leaves the eye along the eye's own view (its four FOV tangents, turned into the frame's axes by c0-c2);
+// where it crosses the frame's plane inside the frame, the point's place across the frame (0..1 from its top left) picks
+// the picture's texel through rect. Beside the frame: alpha 0 (the room, or black). Where the frame reaches past the
+// picture's edge (a coverage miss): black. (As a quad at the frame, RX_VR_WINDOW_LAYER=quad: c0-c2 the identity and the
+// tangents the off-axis view through the frame's corners, so every pixel lands inside it.)
+// Compile: glslangValidator -V --target-env vulkan1.2 --vn VR_WINDOW_GAME_COMP_SPV -o vr_window_game_comp_spv.h vr_window_game.comp
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba8) uniform writeonly image2D eye_out;
+layout(binding = 1) uniform sampler2D left_picture;    // the left eye's picture (the game's, or its only one)
+layout(binding = 2) uniform sampler2D right_picture;   // the right eye's (True stereo's second layer, else the same)
+
+layout(push_constant) uniform Push {
+    float fade;      // the window's own fade (out as an eye nears the frame's plane)
+    float back;      // 1: the frame seen from behind is a dark panel (the Window section's Back panel)
+    float h7;        // (the frame-to-picture map's h7, below)
+    float right;     // 1: the right eye's picture
+    vec4 h0123;      // the frame-to-picture map (window_view.inc WindowMap): u = (h0 fx + h1 fy + h2) / (h6 fx + h7 fy + 1),
+                     // v = (h3 fx + h4 fy + h5) / (the same), fx and fy 0..1 across the frame from its top left
+    vec4 eye;        // xyz: the eye in the frame's coordinates (x right, y up, z toward the viewer); w: Move mode (handles)
+    vec4 tangent;    // the eye's view: its left, right, bottom and top edges' tangents at 1 m along its -z
+    vec4 c0, c1, c2; // xyz: the eye's x, y and z axes in the frame's coordinates; w: the map's h4, h5 and h6
+    vec4 half_size;  // xy: the frame's half width and half height, metres; z: its roundness; w: its feather (m)
+} pc;
+
+// How far a point of the frame's plane is inside its shape (m; negative outside): its rectangle, or with round > 0 the
+// superellipse |x/a|^n + |y/b|^n = 1, n = 2 / round (window_view.inc window_inside)
+float inside(vec2 xy, vec2 hs, float round_)
+{
+    if (round_ <= 0.005) return min(hs.x - abs(xy.x), hs.y - abs(xy.y));
+    float n = 2.0 / min(round_, 1.0);
+    float s = pow(pow(abs(xy.x) / hs.x, n) + pow(abs(xy.y) / hs.y, n), 1.0 / n);
+    return (1.0 - s) * min(hs.x, hs.y);
+}
+
+// Move mode's handles over the frame (edit: 1 + the handle under a laser + 1, 0 none): 0-3 the corners, 4-7 the rounding
+// dots inside them (window_view.inc window_handle), and the shape's outline. A colour, or alpha 0 where none
+vec4 handles(vec2 xy, vec2 hs, float round_, float edit)
+{
+    if (edit < 0.5) return vec4(0);
+    int hot = int(edit + 0.5) - 2;
+    for (int i = 0; i < 8; i++) {
+        vec2 sgn = vec2((i & 3) == 1 || (i & 3) == 2 ? 1.0 : -1.0, (i & 3) < 2 ? 1.0 : -1.0);
+        float k = 1.0;
+        if (i >= 4) {   // (window_round_range: from 2 handles in, toward the ellipse's diagonal point as it rounds)
+            float k0 = max(0.3, 1.0 - 2.0 * 0.03 / max(0.05, min(hs.x, hs.y))), k1 = min(0.7071, k0 - 0.15);
+            k = k0 + (k1 - k0) * clamp(round_, 0.0, 1.0);
+        }
+        float r = length(xy - sgn * hs * k);
+        float size = i == hot ? 0.038 : 0.03;
+        if (r < size) return r > size - 0.006 ? vec4(0.2, 0.12, 0.05, 1)
+                                              : (i < 4 ? vec4(1.0, 0.95, 0.85, 1) : vec4(1.0, 0.7, 0.35, 1)) * (i == hot ? 1.0 : 0.85);
+    }
+    float d = inside(xy, hs, round_);
+    if (abs(d) < 0.004) return vec4(1.0, 0.9, 0.7, 1);
+    return vec4(0);
+}
+
+vec4 at(vec2 uv)
+{
+    vec2 hs = pc.half_size.xy;
+    vec3 d = pc.c0.xyz * mix(pc.tangent.x, pc.tangent.y, uv.x) + pc.c1.xyz * mix(pc.tangent.w, pc.tangent.z, uv.y) - pc.c2.xyz;
+    vec3 o = pc.eye.xyz;
+    if (o.z <= 0.0 && pc.back > 0.5 && d.z > 1e-6) {   // (behind the frame: its back, a dark panel where it is)
+        vec2 bxy = o.xy + d.xy * (-o.z / d.z);
+        float a = clamp(inside(bxy, hs, pc.half_size.z) / 0.004, 0.0, 1.0);
+        return vec4(vec3(0.05, 0.05, 0.06) * a, a);
+    }
+    if (o.z <= 0.0 || d.z >= -1e-6) return vec4(0);   // (away from the plane)
+    vec2 xy = o.xy + d.xy * (o.z / -d.z);
+    vec4 handle = handles(xy, hs, pc.half_size.z, pc.eye.w);
+    if (handle.a > 0.0) return handle;
+    float in_ = inside(xy, hs, pc.half_size.z);
+    float a = pc.half_size.w > 0.0 ? clamp(in_ / pc.half_size.w, 0.0, 1.0) : (in_ >= 0.0 ? 1.0 : 0.0);
+    if (a <= 0.0) return vec4(0);   // (beside the frame)
+    vec2 f = vec2(xy.x / (2.0 * hs.x) + 0.5, 0.5 - xy.y / (2.0 * hs.y));   // (across the frame, from its top left)
+    float den = pc.c2.w * f.x + pc.h7 * f.y + 1.0;
+    if (den <= 1e-6) return vec4(0, 0, 0, a);   // (behind the camera)
+    vec2 p = vec2(pc.h0123.x * f.x + pc.h0123.y * f.y + pc.h0123.z, pc.h0123.w * f.x + pc.c0.w * f.y + pc.c1.w) / den;
+    // (near the picture's edge, a short fade to black: a coverage limit softened, not a hard cut)
+    float edge = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y));
+    if (edge <= 0.0) return vec4(0, 0, 0, a);   // (past the picture's edge)
+    float fade = clamp(edge / 0.04, 0.0, 1.0);
+    return vec4((pc.right > 0.5 ? texture(right_picture, p) : texture(left_picture, p)).rgb * fade * a, a);
+}
+
+void main()
+{
+    // (this eye's picture: half of eye_out's width, its x there right * that)
+    const ivec2 size = imageSize(eye_out);
+    const vec2 out_size = vec2(size.x / 2, size.y);
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(out_size.x) || px.y >= int(out_size.y)) return;
+    // (four rays a pixel at the frame's edge, one inside: the edge antialiased)
+    vec2 o = (vec2(px) + 0.5) / out_size, h = 0.25 / out_size;
+    vec4 c = at(o);
+    vec4 a = at(o + vec2(-h.x, -h.y)), b = at(o + vec2(h.x, h.y));
+    if (a.a != c.a || b.a != c.a) c = 0.25 * (a + b + at(o + vec2(h.x, -h.y)) + at(o + vec2(-h.x, h.y)));
+    // (the window's own fade: on its front only; from behind the eye is past the plane, its back panel unfaded)
+    imageStore(eye_out, px + ivec2(int(pc.right * out_size.x), 0), pc.eye.z > 0.0 ? c * pc.fade : c);
+}
