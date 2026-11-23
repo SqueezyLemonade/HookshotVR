@@ -1,3 +1,6 @@
+v1.0.1
+Alpha v1.0.1: Free space checks the drive you unpacked to, not C: or your home drive
+
 v1.0.0
 Alpha v1.0.0: the first public release
 Sword combat with both hands, the shield, Deku Sticks

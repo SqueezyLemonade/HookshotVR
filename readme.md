@@ -4,7 +4,7 @@
 
 <h1 align="center">HookshotVR</h1>
 
-<p align="center"><b>Play <i>Ocarina of Time</i> in your VR headset, on your PC. Alpha v1.0.0.</b></p>
+<p align="center"><b>Play <i>Ocarina of Time</i> in your VR headset, on your PC. Alpha v1.0.1.</b></p>
 
 <p align="center">
   <a href="#download">Download</a> |
@@ -33,8 +33,8 @@ how it went.
 
 Get the file for your system from the [latest release](../../releases/latest):
 
-- **Windows 10 / 11:** [`HookshotVR-Alpha-v1.0.0-windows-x64.zip`](../../releases/download/v1.0.0/HookshotVR-Alpha-v1.0.0-windows-x64.zip)
-- **Linux:** [`HookshotVR-Alpha-v1.0.0-linux-x86_64.tar.gz`](../../releases/download/v1.0.0/HookshotVR-Alpha-v1.0.0-linux-x86_64.tar.gz)
+- **Windows 10 / 11:** [`HookshotVR-Alpha-v1.0.1-windows-x64.zip`](../../releases/download/v1.0.1/HookshotVR-Alpha-v1.0.1-windows-x64.zip)
+- **Linux:** [`HookshotVR-Alpha-v1.0.1-linux-x86_64.tar.gz`](../../releases/download/v1.0.1/HookshotVR-Alpha-v1.0.1-linux-x86_64.tar.gz)
 
 <!-- Placeholder: these links are relative to this repository, so they work wherever it lives. -->
 

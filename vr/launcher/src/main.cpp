@@ -98,7 +98,8 @@ static void refresh() {
     app.paths = sys::paths(app.cfg);
     if (app.screen == Screen::Building) return;
     app.screen = app.paths.game_built ? Screen::Main : Screen::Setup;
-    if (!app.preview) app.free_gb = sys::free_gb(app.cfg.hookshot.empty() ? sys::home() : app.cfg.hookshot);
+    // (the folder the build goes to: the one found beside the launcher before the first build saves it, not the home drive)
+    if (!app.preview) app.free_gb = sys::free_gb(!app.paths.hookshot.empty() ? app.paths.hookshot : sys::home());
 }
 
 static std::string read_text(const std::string &p) {

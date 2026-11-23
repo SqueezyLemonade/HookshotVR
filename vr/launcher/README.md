@@ -136,7 +136,7 @@ available") or Update then does everything, and leaves the build the player play
 A failure or Cancel anywhere before the switch deletes what the update made and leaves the old build as it was. What an
 update stopped midway left (the launcher closed in it) is cleared at the next start. Untested against a real release.
 
-The version (`upd::kVersion`, v1.0.0, shown as `kVersionName`, Alpha v1.0.0) opens the Changelog, read from `CHANGELOG.txt`: a `vX.Y.Z` line, then its lines.
+The version (`upd::kVersion`, v1.0.1, shown as `kVersionName`, Alpha v1.0.1) opens the Changelog, read from `CHANGELOG.txt`: a `vX.Y.Z` line, then its lines.
 View Online shows once `kReleasePage` is set.
 
 ## Art slots

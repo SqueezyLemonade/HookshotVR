@@ -1,4 +1,4 @@
-# HookshotVR Alpha v1.0.0: known issues
+# HookshotVR Alpha v1.0.1: known issues
 
 Problems we know about. If you see one of these, you don't need to report it. If you have something new, or more to add
 (where it happens, your hardware), please do: see [how to send a log](vr-troubleshooting.md#how-to-send-a-log).

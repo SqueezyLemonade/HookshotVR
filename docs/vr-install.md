@@ -1,6 +1,6 @@
 # HookshotVR: install and play
 
-**HookshotVR Alpha v1.0.0.** Unofficial. Not affiliated with Nintendo or the Hookshot project. Bring your own legally
+**HookshotVR Alpha v1.0.1.** Unofficial. Not affiliated with Nintendo or the Hookshot project. Bring your own legally
 obtained copy of the game.
 
 HookshotVR plays *Ocarina of Time* in a VR headset, on your PC, in first or third person. It is a VR fork of
@@ -33,14 +33,14 @@ Get the file for your system from this release's page on GitHub:
 
 | System | File |
 | --- | --- |
-| Windows 10 / 11 | `HookshotVR-Alpha-v1.0.0-windows-x64.zip` |
-| Linux | `HookshotVR-Alpha-v1.0.0-linux-x86_64.tar.gz` |
+| Windows 10 / 11 | `HookshotVR-Alpha-v1.0.1-windows-x64.zip` |
+| Linux | `HookshotVR-Alpha-v1.0.1-linux-x86_64.tar.gz` |
 
 It is one download: the launcher, HookshotVR, and Hookshot's builder, so there is nothing else to get.
 
 - **Windows:** unzip it anywhere you like (not into a folder that needs administrator rights), for example
   `C:\Games\HookshotVR`, and start the launcher in it.
-- **Linux:** unpack the tar (`tar xzf HookshotVR-Alpha-v1.0.0-linux-x86_64.tar.gz`) and start the launcher. To get a menu entry and a desktop
+- **Linux:** unpack the tar (`tar xzf HookshotVR-Alpha-v1.0.1-linux-x86_64.tar.gz`) and start the launcher. To get a menu entry and a desktop
   icon, run the launcher once from a terminal with `--install` (`hookshotvr-launcher --install`). The icon opens the
   launcher with no terminal. Run it again if you move the folder.
 

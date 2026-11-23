@@ -10,8 +10,8 @@
 
 namespace upd {
 
-const char *const kVersion = "v1.0.0";
-const char *const kVersionName = "Alpha v1.0.0";
+const char *const kVersion = "v1.0.1";
+const char *const kVersionName = "Alpha v1.0.1";
 // The public release repo (tags vX.Y.Z); never a URL with a token in it
 const char *const kReleaseRepo = "https://git.notrexed.dev/SqueezyLemonade/HookshotVR.git";
 const char *const kReleasePage = "https://git.notrexed.dev/SqueezyLemonade/HookshotVR/releases";
