@@ -93,7 +93,7 @@ extern "C" int hookshot_vr_hands(HookshotVrHands* out) {
     return 1;
 }
 
-// The VR menu (vr/menu/vr_menu.inc), from the game side's held left Menu button (vr/input/controllers_host.c): toggle 1 opens
+// The VR menu (vr/menu/vr_menu.inc), from the game side's held left Menu button or Y (vr/input/controllers_host.c): toggle 1 opens
 // or closes it, 0 only asks. The answer: open now (1) or not (0)
 extern "C" int hookshot_vr_menu(int toggle) {
     if (toggle && !vr::panel_toggle()) logf("vr: VR menu not opened: Hookshot's menu is open");

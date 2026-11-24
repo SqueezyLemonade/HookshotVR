@@ -4,7 +4,8 @@
 //
 //   hookshotvr-launcher                         the launcher
 //   hookshotvr-launcher --state <name>          one screen of the design, with sample values (nothing is started or saved):
-//                                               setup, building, ready, desktop, waiting, notrunning, noruntime, update,
+//                                               setup, building, ready, desktop, waiting, playanyway, twoservers, steamvr,
+//                                               shortcut, notrunning, noruntime, update,
 //                                               settings, changelog, updatelog, updating; or live: this PC's own state (with --screenshot, nothing
 //                                               is saved or started)
 //   hookshotvr-launcher --state <name> --screenshot <file.png> [--scale <n>]   that screen into a PNG, no window shown
@@ -45,7 +46,7 @@ using upd::kVersion;
 static constexpr double kNeededGB = 60;
 
 enum class Screen { Setup, Building, Main };
-enum class Overlay { None, Settings, Changelog, UpdateLog };
+enum class Overlay { None, Settings, Changelog, UpdateLog, PlayAnyway, AddShortcut };
 enum class FileState { None, Checking, Ok, Bad };
 
 struct Art {
@@ -61,6 +62,7 @@ struct App {
     Screen screen = Screen::Setup;
     Overlay overlay = Overlay::None;
     bool vr = true;
+    int menu_button = sys::kMenuY;   // (the game's Menu button setting: the line under Play, and Settings)
     // the first start
     FileState file = FileState::None;
     std::string file_text;
@@ -105,6 +107,7 @@ static void refresh() {
     app.screen = app.paths.game_built ? Screen::Main : Screen::Setup;
     // (the folder the build goes to: the one found beside the launcher before the first build saves it, not the home drive)
     if (!app.preview) app.free_gb = sys::free_gb(!app.paths.hookshot.empty() ? app.paths.hookshot : sys::home());
+    if (!app.preview) app.menu_button = sys::read_menu_button(app.paths);
 }
 
 static std::string read_text(const std::string &p) {
@@ -191,15 +194,10 @@ static bool vr_waiting() {
     return app.vr && (s.session != sys::Check::Ok || s.headset == sys::Check::Waiting);
 }
 
-static void play() {
+static void launch() {
     if (app.preview || app.game.ok()) return;
-    if (app.vr && vr_waiting()) {
-        // (Start With: its app now, the game once the runtime answers. Again: not after all)
-        if (app.pending_play) app.pending_play = false;
-        else if (app.vr_state.can_start && sys::start_with(app.cfg)) app.pending_play = true;
-        return;
-    }
     app.pending_play = false;
+    if (app.overlay == Overlay::PlayAnyway) app.overlay = Overlay::None;
     std::string err;
     if (!sys::launch_game(app.paths, app.cfg, app.vr, app.vr_state.runtime, &app.game, &err)) {
         say("Start failed");
@@ -208,6 +206,46 @@ static void play() {
         return;
     }
     if (app.cfg.on_start == sys::kCloseLauncher) app.quit = true;
+}
+
+// (v1.0.2) The checks are advice, never a block: Play always starts the game. With the runtime or the headset not found,
+// Start With's app first when one is set (the game once they answer), else, or on Play again while it waits, one question.
+// (Before, Play waited for the checks: two WiVRn servers, and the launcher asked the one without the headset for ever)
+static void play() {
+    if (app.preview || app.game.ok()) return;
+    if (app.vr && vr_waiting()) {
+        if (!app.pending_play && app.vr_state.can_start && sys::start_with(app.cfg)) {
+            app.pending_play = true;
+            return;
+        }
+        app.overlay = Overlay::PlayAnyway;
+        return;
+    }
+    launch();
+}
+static const char *play_anyway_question() {
+    const sys::VrState &s = app.vr_state;
+    return !s.runtime.found ? "No VR runtime found. Play anyway?"
+           : s.session != sys::Check::Ok ? "VR runtime not running. Play anyway?" : "Headset not found. Play anyway?";
+}
+// (Linux, the first start: a menu entry and a desktop icon, as --install makes them, asked once; Windows' zip has none to
+// add. Run as a second launcher with --install: its icon is drawn in a hidden window of its own)
+static void answer_shortcut(bool yes) {
+    app.cfg.asked_shortcut = true, app.overlay = Overlay::None;
+    save();
+    if (!yes || app.preview) return;
+    sys::Proc p = plat::spawn({sys::join(sys::exe_dir(), plat::launcher_file()), "--install"}, {}, sys::exe_dir(), plat::Out::Null);
+    say(p.ok() && plat::wait(p) == 0 ? "Added to your menu and desktop" : "Could not add it to the menu");
+}
+static void screen_add_shortcut() {
+    text(fonts.semibold, 30, 640, 420, kInkButton, "Add HookshotVR to your menu and desktop?", Center);
+    if (small_button("short_no", 640 - 12 - 200, 470, 200, 40, "No", false)) answer_shortcut(false);
+    if (small_button("short_yes", 640 + 12, 470, 200, 40, "Yes", true)) answer_shortcut(true);
+}
+static void screen_play_anyway() {
+    text(fonts.semibold, 30, 640, 420, kInkButton, play_anyway_question(), Center);
+    if (small_button("anyway_cancel", 640 - 12 - 200, 470, 200, 40, "Cancel", false)) app.pending_play = false, app.overlay = Overlay::None;
+    if (small_button("anyway_play", 640 + 12, 470, 200, 40, "Play", true)) launch();
 }
 
 static bool overlay_free() { return app.overlay == Overlay::None && !sys::dialog_open(); }
@@ -281,11 +319,15 @@ static void screen_main(float t) {
             a.fix = "Change", a.on_fix = [] { app.overlay = Overlay::Settings; };
         } else {
             a.name = sys::runtime_label(s.runtime);
-            a.text = s.session == sys::Check::Ok ? "Running" : s.session == sys::Check::Waiting ? "Not running" : "Checking";
+            a.text = s.session == sys::Check::Ok ? (s.servers >= 2 ? std::to_string(s.servers) + " running" : "Running")
+                     : s.session == sys::Check::Waiting ? (s.servers >= 2 ? std::to_string(s.servers) + " running, none answers" : "Not running")
+                                                        : "Checking";
             if (s.can_start && !app.pending_play) a.fix = "Start", a.on_fix = [] { if (!app.preview) sys::start_with(app.cfg); };
         }
         rows.push_back(a);
-        const char *h = s.headset == sys::Check::Ok ? "Connected" : s.headset == sys::Check::Waiting ? "Waiting" : "Unknown";
+        // (Not checked: SteamVR is never asked, a probe would start it; the game says in its log)
+        const char *h = s.headset == sys::Check::Ok ? "Connected" : s.headset == sys::Check::Waiting ? "Waiting"
+                        : s.session == sys::Check::Unknown ? "Checking" : "Not checked";
         rows.push_back({"Headset", h, dot_of(s.headset), s.headset != sys::Check::Waiting, "", nullptr});
         float y = update ? 519 : 459;
         for (size_t i = 0; i < rows.size(); i++) check_row(rows[i], y + 52 * i, (int)i);
@@ -399,7 +441,10 @@ static void screen_log(bool update) {
 static const char *kOnStart[] = {"Close Launcher", "Keep Open"};
 static const char *kUpdates[] = {"Automatic", "Notify", "Off"};
 static const char *kRuntimes[sys::kRuntimeKinds] = {"System Default", "WiVRn", "SteamVR", "Monado", "Custom"};
-static const float kRowH = 40;   // (seven rows between the wordmark and the bottom row)
+static const char *kViews[] = {"First person", "Third person", "Window"};   // (sys::kViewFirst, kViewThird, kViewWindow)
+static const char *k3d[] = {"Mono", "Stereo", "From depth"};                // (sys::k3dMono, k3dStereo, k3dFromDepth: sys::k3dModes of them)
+static const char *kMenuButtons[] = {"Menu or Y", "Both sticks"};             // (sys::kMenuY, kMenuSticks)
+static const float kRowH = 29;   // (ten rows between the wordmark and the bottom row)
 
 // A value with an arrow either side; true when it changed
 static bool setting_value(const char *id, float y, int *value, const char *const *names, int n) {
@@ -418,11 +463,23 @@ static bool setting_value(const char *id, float y, int *value, const char *const
 }
 
 static void screen_settings() {
-    const char *names[7] = {"On Game Start", "Updates", "VR Runtime", "Start With", "Hookshot Folder", "HookshotVR Folder", "Logs"};
+    const char *names[10] = {"On Game Start", "Updates", "VR Runtime", "View", "3D", "Menu button", "Start With", "Hookshot Folder",
+                             "HookshotVR Folder", "Logs"};
     const float col = CX + CW - 12 - 440;
-    float y = 325;
-    for (int i = 0; i < 7; i++, y += kRowH) {
-        const float cy = y + kRowH * 0.5f, by = cy - 16;
+    // (View: the game's own setting, read back from its settings file each time Settings opens; none yet: the game's
+    // default, First person. Chosen here, it is written there at once, before Play: no controller needed)
+    // (3D the same way: the VR menu's Mono and Stereo; not set, the game's default)
+    static int view = sys::kViewFirst, mode3d = sys::k3dMono, drawn_at = -2;
+    if (ImGui::GetFrameCount() != drawn_at + 1 && !app.preview) {
+        const int v = sys::read_view(app.paths);
+        view = v < 0 ? sys::kViewFirst : v;
+        mode3d = sys::read_3d(app.paths);
+        app.menu_button = sys::read_menu_button(app.paths);   // (and Menu button)
+    }
+    drawn_at = ImGui::GetFrameCount();
+    float y = 314;
+    for (int i = 0; i < 10; i++, y += kRowH) {
+        const float cy = y + kRowH * 0.5f, by = cy - 13;
         text(fonts.medium, 22, CX + 12, cy, kInk, names[i]);
         switch (i) {
             case 0: setting_value("onstart", y, &app.cfg.on_start, kOnStart, 2); break;
@@ -434,30 +491,42 @@ static void screen_settings() {
                 if (app.cfg.runtime == sys::kRuntimeCustom && !app.cfg.runtime_json.empty())
                     text(fonts.medium, 19, col - 20, cy, kInkMuted, fit(fonts.medium, 19, sys::base_name(app.cfg.runtime_json), 300), Right);
                 break;
-            case 3: {
+            case 3:
+                if (setting_value("view", y, &view, kViews, 3) && !app.preview && !sys::write_view(app.paths, view))
+                    say("Build the game first");   // (no game folder yet to keep it in)
+                break;
+            case 4:
+                if (setting_value("3d", y, &mode3d, k3d, sys::k3dModes) && !app.preview && !sys::write_3d(app.paths, mode3d))
+                    say("Build the game first");
+                break;
+            case 5:
+                if (setting_value("menubutton", y, &app.menu_button, kMenuButtons, 2) && !app.preview && !sys::write_menu_button(app.paths, app.menu_button))
+                    say("Build the game first");
+                break;
+            case 6: {
                 // (off unless the player picks an app: the launcher never starts a runtime by itself)
                 bool set = !app.cfg.start_with.empty();
                 text(fonts.medium, 21, col + 60, cy, set ? kInkButton : kInkMuted,
                      set ? fit(fonts.medium, 21, sys::app_name(app.cfg.start_with), 400) : "Off", Right);
-                if (small_button("swchoose", col + 74, by, 140, 32, "Choose", true)) choose_start_with();
-                if (small_button("swoff", col + 226, by, 140, 32, "Off", set) && set) app.cfg.start_with.clear(), save();
+                if (small_button("swchoose", col + 74, by, 140, 26, "Choose", true)) choose_start_with();
+                if (small_button("swoff", col + 226, by, 140, 26, "Off", set) && set) app.cfg.start_with.clear(), save();
                 break;
             }
-            case 4:
-                if (small_button("hsshow", col + 74, by, 140, 32, "Show", true) && !app.preview && !app.paths.hookshot.empty())
+            case 7:
+                if (small_button("hsshow", col + 74, by, 140, 26, "Show", true) && !app.preview && !app.paths.hookshot.empty())
                     sys::open_folder(app.paths.hookshot);
-                if (small_button("hschange", col + 226, by, 140, 32, "Change", true)) choose_folder(&app.cfg.hookshot, "Hookshot Folder");
+                if (small_button("hschange", col + 226, by, 140, 26, "Change", true)) choose_folder(&app.cfg.hookshot, "Hookshot Folder");
                 break;
-            case 5:
-                if (small_button("hvopen", col + 74, by, 140, 32, "Open", true) && !app.preview && !app.paths.repo.empty())
+            case 8:
+                if (small_button("hvopen", col + 74, by, 140, 26, "Open", true) && !app.preview && !app.paths.repo.empty())
                     sys::open_folder(app.paths.repo);
-                if (small_button("hvchange", col + 226, by, 140, 32, "Change", true)) {
+                if (small_button("hvchange", col + 226, by, 140, 26, "Change", true)) {
                     if (app.cfg.hookshotvr.empty()) app.cfg.hookshotvr = app.paths.repo;
                     choose_folder(&app.cfg.hookshotvr, "HookshotVR Folder");
                 }
                 break;
-            case 6:
-                if (small_button("logs", col + 74, by, 292, 32, "Open", true) && !app.preview) {
+            case 9:
+                if (small_button("logs", col + 74, by, 292, 26, "Open", true) && !app.preview) {
                     sys::make_dirs(app.paths.crashes);
                     sys::open_folder(app.paths.logs);
                 }
@@ -501,13 +570,18 @@ static void bottom_row() {
     const float bx = 879, by = 649, bw = 311, bh = 52;
     if (app.screen == Screen::Main) {
         bool running = app.game.ok();
-        bool waiting = app.vr && vr_waiting();
-        // (waiting with Start With set: Play starts that app first, then the game; Starting until the runtime answers)
+        // (Start With set and the runtime not up: Play starts that app first, Starting until the runtime answers; Play is
+        // never held back by the checks: play)
         if (running) big_button("play", bx, by, bw, bh, "Running", 2, 24);
         else if (app.pending_play) {
             if (big_button("play", bx, by, bw, bh, "Starting", 1, 26)) play();
-        } else if (waiting && !app.vr_state.can_start) big_button("play", bx, by, bw, bh, "Waiting", 2, 24);
-        else if (big_button("play", bx, by, bw, bh, "Play", 0, 29)) play();
+        } else if (big_button("play", bx, by, bw, bh, "Play", 0, 29)) play();
+        // (v1.0.2: players did not know how to open the VR menu, where View and 3D are: said under Play. The gestures are
+        // vr/input's and vrm_key's (vr/menu/vr_menu.inc): keep this line with them. The launcher does not know the
+        // controller: Y is the usual name; the VR menu's Controls page says the real one)
+        if (app.vr)
+            text(fonts.medium, 18, bx + bw * 0.5f, by + bh + 14, kInkMuted,
+                 app.menu_button == sys::kMenuSticks ? "VR menu: hold left menu or both sticks, or F2" : "VR menu: hold left menu or Y, or F2", Center);
     } else if (app.screen == Screen::Setup) {
         if (!build_ready()) big_button("build", bx, by, bw, bh, "Build", 2, 26);
         else if (big_button("build", bx, by, bw, bh, "Build", 0, 29)) start_build();
@@ -545,6 +619,8 @@ static void frame_ui(float t) {
         case Overlay::Settings: screen_settings(); break;
         case Overlay::Changelog: screen_log(false); break;
         case Overlay::UpdateLog: screen_log(true); break;
+        case Overlay::PlayAnyway: screen_play_anyway(); break;
+        case Overlay::AddShortcut: screen_add_shortcut(); break;
         case Overlay::None:
             if (app.screen == Screen::Main) screen_main(t);
             else if (app.screen == Screen::Setup) screen_setup();
@@ -612,7 +688,7 @@ static void tick() {
     if (!app.preview) {
         sys::vr_watch(app.screen == Screen::Main && app.vr, app.cfg);
         app.vr_state = sys::vr_state();
-        if (app.pending_play && !vr_waiting()) play();   // (Start With's app is up: the game now)
+        if (app.pending_play && !vr_waiting()) launch();   // (Start With's app is up: the game now)
         if (app.auto_build && app.screen == Screen::Setup && overlay_free() && build_ready()) app.auto_build = false, start_build();
         if (app.auto_update && app.update_ready && app.screen == Screen::Main && overlay_free()) app.auto_update = false, start_update();
         // (--play: once the screen is the main one and, in VR, the checks have answered and found the runtime and headset)
@@ -643,6 +719,15 @@ static bool set_preview(const std::string &st) {
         app.vr = false;
     } else if (st == "waiting") {
         v.session = sys::Check::Waiting, v.headset = sys::Check::Waiting, v.can_start = true;
+    } else if (st == "playanyway") {   // (v1.0.2: Play with the headset not found, two WiVRn servers running)
+        v.headset = sys::Check::Waiting, v.servers = 2;
+        app.overlay = Overlay::PlayAnyway;
+    } else if (st == "shortcut") {
+        app.overlay = Overlay::AddShortcut;
+    } else if (st == "twoservers") {
+        v.headset = sys::Check::Waiting, v.servers = 2;
+    } else if (st == "steamvr") {
+        v.runtime.name = "SteamVR", v.runtime.is = sys::kRuntimeSteamVR, v.headset = sys::Check::Unknown;
     } else if (st == "notrunning") {
         v.session = sys::Check::Waiting, v.headset = sys::Check::Waiting;
     } else if (st == "noruntime") {
@@ -723,7 +808,10 @@ static ImFont *load_font(const std::vector<std::string> &dirs, const std::vector
 static int install_entry(bool install, const std::string &icon, float scale, const char *argv0) {
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    if (!win::open("HookshotVR", 256, 256, true)) return 1;
+    if (!win::open("HookshotVR", 256, 256, true)) {
+        plat::error_box("HookshotVR Launcher", (std::string("The icon could not be drawn: ") + win::open_error()).c_str());
+        return 1;
+    }
     const int px = (int)(256 * (scale > 0 ? scale : 1));
     win::set_offscreen(px, px, 1);
     for (int i = 0; i < 2; i++) {
@@ -815,7 +903,10 @@ int main(int argc, char **argv) {
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    if (!win::open("HookshotVR", (int)kW, (int)kH, !shot.empty())) return 1;
+    if (!win::open("HookshotVR", (int)kW, (int)kH, !shot.empty())) {   // (said, not a silent exit)
+        plat::error_box("HookshotVR Launcher", (std::string("The launcher could not open its window: ") + win::open_error() + ".").c_str());
+        return 1;
+    }
 
     std::string here = sys::exe_dir(), repo = app.paths.repo.empty() ? sys::find_repo() : app.paths.repo;
     std::vector<std::string> font_dirs = {sys::join(here, "fonts"), repo.empty() ? "" : sys::join(repo, "vr/launcher/fonts"),
@@ -862,6 +953,10 @@ int main(int argc, char **argv) {
             }
             if (app.after_update) say(std::string("Updated to ") + upd::kVersionName);
             upd::check(app.paths, app.cfg);
+#ifndef _WIN32
+            // (asked once, answer_shortcut; not over --play or an update's restart, which go on by themselves)
+            if (!app.cfg.asked_shortcut && shot.empty() && !app.auto_play && !app.after_update) app.overlay = Overlay::AddShortcut;
+#endif
         }
     }
 

@@ -65,7 +65,8 @@ int hos_vr_radial_open(void) { return __atomic_load_n(&oot_vr_radial_side, __ATO
    read from the controllers themselves (their stick buttons, before any controller layout: through the player's layout the
    click came to the game as another button and opened its own menu, 17 Nov); vr/input/controllers_host.c keeps them from
    the game. A click: pressed and let go within 0.4 s with no menu button meanwhile (the Minus and Hookshot menu chords), and
-   for the left one no right stick pushed (the D-pad chord). */
+   for the left one no right stick pushed (the D-pad chord). With the Menu button row at Both sticks, not while the other one
+   is down too: both are the VR menu's. */
 static uint64_t oot_vr_radial_controls(uint64_t buttons) {
     const uint64_t LS = 1ULL << 4, RS = 1ULL << 5;
     static int was[2], pending[2], armed;
@@ -82,6 +83,7 @@ static uint64_t oot_vr_radial_controls(uint64_t buttons) {
         const int down = (bt[h] & 4) != 0;
         if (down && !was[h]) pending[h] = 1, pressed_at[h] = now;
         if (pending[h] && ((bt[0] & 8) || (!h && rx * rx + ry * ry > .3f))) pending[h] = 0;   /* (chords: not a click) */
+        if ((bt[0] & 4) && (bt[1] & 4) && rx_option(1034, 0) == 1) pending[h] = 0;
         const int click = !down && was[h] && pending[h] && now - pressed_at[h] < 400000000LL;
         if (!down) pending[h] = 0;
         was[h] = down;

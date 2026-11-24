@@ -88,6 +88,7 @@ enum {
 static int listening;   // (a control waiting for its key: the menu's; 0 here unless a case sets it)
 enum { HOS_BIND_KEY = 1 };   // (vk_api.h: F12 bound to no game button here)
 static std::atomic<bool> screenshot_want{false};   // (F12: vk_menu.cpp)
+static void vrm_key(bool) {}   // (F2: vr/menu/vr_menu.inc, vr/tools/test.py menu_f2)
 using HWND = int;
 using DWORD = unsigned;
 static int down_key, queued_key;

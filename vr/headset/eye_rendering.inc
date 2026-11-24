@@ -29,7 +29,27 @@ struct FlatScreen {
     XrPosef pose{{0, 0, 0, 1}, {0, 0, 0}};
     float width = 0, height = 0;
     uint32_t w = 0, h = 0;       // the picture's size in eyes[0]'s image
+    XrTime display_time = 0;     // this frame's
+    XrTime reopen_at = 0;        // (a recenter by the headset: opened again where you are from then on; 0 none, flat_place)
+    bool reopen = false;         // (the headset was taken off: the same)
 } flat_screen;
+
+/// RX_VR_FLAT_LAYER: how a flat frame (the title, menus, movies) goes to the headset. eyes (the default): drawn into each eye
+/// at its own located pose and FOV (flat_eyes.inc); projection: one picture for both eyes at the screen's fixed pose, as
+/// before v1.0.2; quad: a quad fixed in the room
+enum FlatMode { kFlatEyes, kFlatProjection, kFlatQuad };
+const char* flat_mode_name(FlatMode m) { return m == kFlatEyes ? "eyes" : m == kFlatProjection ? "projection" : "quad"; }
+FlatMode flat_mode() {
+    static const FlatMode mode = [] {
+        const char* e = getenv("RX_VR_FLAT_LAYER");
+        const FlatMode m = e && !std::strcmp(e, "projection") ? kFlatProjection : e && !std::strcmp(e, "quad") ? kFlatQuad : kFlatEyes;
+        logf("vr: flat frames: RX_VR_FLAT_LAYER=%s%s", flat_mode_name(m), !e || !*e ? " (the default)"
+             : std::strcmp(e, flat_mode_name(m)) ? " (the value set is none of eyes, projection, quad: the default)" : "");
+        return m;
+    }();
+    return mode;
+}
+const char* flat_mode_name() { return flat_mode_name(flat_mode()); }
 int64_t swap_format = 0;
 VkCommandPool cmd_pool = VK_NULL_HANDLE;
 VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -216,7 +236,8 @@ void poll_events() {
     while (xrPollEvent(s.inst, &ev) == XR_SUCCESS) {
         if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
             const auto* e = (const XrEventDataSessionStateChanged*)&ev;
-            logf("vr: session state %d", (int)e->state);
+            logf("vr: session state %d (at %.1f s)", (int)e->state, run_s());
+            if (e->state == XR_SESSION_STATE_SYNCHRONIZED) flat_screen.reopen = true;
             if (e->state == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
                 bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
@@ -231,8 +252,12 @@ void poll_events() {
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {   // (a recenter by the runtime: the Window
             // view's frame stays where the room's space now puts it; the menu's Place window moves it)
             const auto* e = (const XrEventDataReferenceSpaceChangePending*)&ev;
-            logf("vr: the runtime's %s space is changing (a recenter by the headset)",
+            logf("vr: [%.1f s] the runtime's %s space is changing (a recenter by the headset)", run_s(),
                  e->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ? "room (LOCAL)" : e->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW ? "head" : "other");
+            if (e->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL) flat_screen.reopen_at = std::max<XrTime>(e->changeTime, 1);
+        } else {   // (another event: said for a player's log, bounded)
+            static int told = 0;
+            if (told++ < 20) logf("vr: [%.1f s] runtime event %d", run_s(), (int)ev.type);
         }
         ev = XrEventDataBuffer{XR_TYPE_EVENT_DATA_BUFFER};
     }
@@ -264,6 +289,173 @@ uint32_t flat_picture_h(uint32_t w, uint32_t h) {
     return std::clamp(want, std::min(h, 720u), h);
 }
 
+constexpr float kWarpNear = 0.35f;   // (From depth: nearer than this, the eyes' shift eases off: vr_warp_splat.comp distance_at)
+// (v1.0.2, the VR menu's Near depth: the warp's near distance, Low 1 m, Medium 0.6 m, Full kWarpNear. At 3D strength 100% a
+// hand at 0.3 m before the ground at 1.5 m leaves a gap of about 12, 27 and 65 px beside it in each eye. Every distance is
+// eased the same way, so near things keep their order and stay whole: a cap on each pixel's shift against its local
+// background (a max-distance pyramid) would keep a large hand's middle at its full shift and its edges capped, tearing it)
+inline float kWarpNearOf(int near_depth) { return near_depth >= 2 ? kWarpNear : near_depth == 1 ? 0.6f : 1.0f; }
+// Extra camera coverage accommodates motion between rendering and display. Tangents are dimensionless, not degrees.
+constexpr float kCameraGuardBand = 1.03f;
+constexpr float kMaxCameraHalfFovTangent = 3.0f;
+
+/// (v1.0.2) RX_VR_LAYER_FOV: located (the default) submits each eye at its own located FOV, cut from the picture;
+/// symmetric, every eye at the picture's whole symmetric FOV, as before v1.0.2
+bool layer_fov_located() {
+    static const bool located = [] {
+        const char* e = getenv("RX_VR_LAYER_FOV");
+        const bool symmetric = e && !std::strcmp(e, "symmetric");
+        if (e && *e) logf("vr: RX_VR_LAYER_FOV=%s: each eye's layer at %s", e,
+                          symmetric ? "the picture's whole symmetric FOV (as before v1.0.2)" : "its own located FOV");
+        return !symmetric;
+    }();
+    return located;
+}
+
+/// (v1.0.2) An eye's projection view at its own located FOV, widened by the guard band and kept inside the picture: the rect of
+/// the eye's w x h picture (drawn symmetric, |P00| p00 and |P11| p11, so it covers tangents -1/p00..1/p00 across) that holds
+/// that frustum, a tangent t at pixel x = (t p00 + 1) / 2 w (y the same way from the top), and the FOV of the whole pixels
+/// cut. Before v1.0.2 each eye was the whole picture at its symmetric FOV, legal but not what a runtime expects (the spec's
+/// fov "should almost always derive from" xrLocateViews): the suspect for flat, far-away stereo on Meta's PC runtime (Rift S,
+/// CV1) while WiVRn and SteamVR looked right (research/oculus-stereo.md R1). False: the picture's whole FOV stays
+bool located_eye_cut(const XrFovf& eye, float guard, float p00, float p11, uint32_t w, uint32_t h, XrFovf* fov, XrRect2Di* rect) {
+    if (!(p00 > 1e-3f) || !(p11 > 1e-3f) || w < 16 || h < 16) return false;
+    const float tx = 1.0f / p00, ty = 1.0f / p11;   // (the picture's half extent, in tangents)
+    const float l = std::min(std::tan(-eye.angleLeft) * guard, tx), r = std::min(std::tan(eye.angleRight) * guard, tx);
+    const float u = std::min(std::tan(eye.angleUp) * guard, ty), d = std::min(std::tan(-eye.angleDown) * guard, ty);
+    if (!std::isfinite(l + r + u + d) || l + r < 0.2f || u + d < 0.2f) return false;
+    const int32_t x0 = std::clamp((int32_t)std::floor((1.0f - l * p00) * 0.5f * (float)w), 0, (int32_t)w);
+    const int32_t x1 = std::clamp((int32_t)std::ceil((1.0f + r * p00) * 0.5f * (float)w), 0, (int32_t)w);
+    const int32_t y0 = std::clamp((int32_t)std::floor((1.0f - u * p11) * 0.5f * (float)h), 0, (int32_t)h);
+    const int32_t y1 = std::clamp((int32_t)std::ceil((1.0f + d * p11) * 0.5f * (float)h), 0, (int32_t)h);
+    if (x1 - x0 < 16 || y1 - y0 < 16) return false;
+    rect->offset = {x0, y0}, rect->extent = {x1 - x0, y1 - y0};
+    fov->angleLeft = std::atan((2.0f * (float)x0 / (float)w - 1.0f) / p00);
+    fov->angleRight = std::atan((2.0f * (float)x1 / (float)w - 1.0f) / p00);
+    fov->angleUp = std::atan((1.0f - 2.0f * (float)y0 / (float)h) / p11);
+    fov->angleDown = std::atan((1.0f - 2.0f * (float)y1 / (float)h) / p11);
+    return true;
+}
+
+// ---- the world screen's place (every RX_VR_FLAT_LAYER) ----
+constexpr float kFlatLeftMetres = 2.0f;   // (the room-fixed screens: opened again once the head is this far from where it opened)
+XrPosef flat_pose{{0, 0, 0, 1}, {0, 0, 0}};   // where the screen opened: your place and heading then, level
+
+/// The world screen opened for a flat frame when it is not open: in front of where you are and face now, then fixed in the
+/// room. Opened again after a recenter by the headset, its being put back on, or your walking off (not for projection, at no
+/// distance, which stays as before)
+void flat_place(const XrPosef& head) {
+    const float away[3] = {head.position.x - flat_pose.position.x, head.position.y - flat_pose.position.y, head.position.z - flat_pose.position.z};
+    const bool recentred = flat_screen.reopen_at && flat_screen.display_time >= flat_screen.reopen_at;
+    const bool left = away[0] * away[0] + away[1] * away[1] + away[2] * away[2] > kFlatLeftMetres * kFlatLeftMetres;
+    const bool again = flat_mode() != kFlatProjection && (flat_screen.reopen || recentred || left);
+    if (recentred) flat_screen.reopen_at = 0;
+    flat_screen.reopen = false;
+    if (!flat_screen.open || again) {   // (where it opens: your place and heading then, level; then fixed in the room)
+        const XrQuaternionf q = head.orientation;
+        const float yaw = std::atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.x * q.x + q.y * q.y));
+        flat_pose.orientation = {0, std::sin(yaw / 2), 0, std::cos(yaw / 2)};
+        flat_pose.position = head.position;
+        logf("vr: [%.1f s] world screen opened %.0f deg wide, %.1f m ahead (heading %.0f deg)", run_s(), (float)flat_width_deg(),
+             kFlatScreenMetres, yaw * 57.2958f);
+    }
+    flat_screen.open = true;
+}
+
+/// The world screen for a flat picture of w x h: kFlatScreenMetres ahead of where it opened, Screen size wide from there
+void flat_screen_set(uint32_t w, uint32_t h) {
+    const float ahead[3] = {0, 0, -kFlatScreenMetres};
+    float world[3];
+    qrot(flat_pose.orientation, ahead, world);
+    flat_screen.pose = flat_pose;
+    flat_screen.pose.position.x += world[0], flat_screen.pose.position.y += world[1], flat_screen.pose.position.z += world[2];
+    flat_screen.width = 2 * kFlatScreenMetres * std::tan(flat_width_deg() * 0.5f / 57.2958f);
+    flat_screen.height = flat_screen.width * (float)h / (float)w;
+    flat_screen.w = w, flat_screen.h = h;
+    flat_screen.shown = true;
+}
+
+/// vr_flat_eyes.comp's push constants: a screen (its middle and turn, its size in metres) seen from an eye (pose, fov, in the
+/// same space) in a view of px_w x px_h pixels
+struct FlatEyePush { float v[24]; };
+FlatEyePush flat_eye_push(const XrPosef& screen, float width, float height, const XrPosef& eye, const XrFovf& fov, float px_w, float px_h,
+                          float samples) {
+    FlatEyePush p{};
+    const XrQuaternionf to_screen = qinv(screen.orientation);
+    const float dp[3] = {eye.position.x - screen.position.x, eye.position.y - screen.position.y, eye.position.z - screen.position.z};
+    qrot(to_screen, dp, p.v);
+    p.v[4] = std::tan(fov.angleLeft), p.v[5] = std::tan(fov.angleRight), p.v[6] = std::tan(fov.angleDown), p.v[7] = std::tan(fov.angleUp);
+    for (int i = 0; i < 3; i++) {
+        const float unit[3] = {i == 0 ? 1.0f : 0.0f, i == 1 ? 1.0f : 0.0f, i == 2 ? 1.0f : 0.0f};
+        float world[3];
+        qrot(eye.orientation, unit, world);
+        qrot(to_screen, world, p.v + 8 + 4 * i);
+    }
+    p.v[11] = px_w, p.v[15] = px_h;
+    p.v[20] = 0.5f * width, p.v[21] = 0.5f * height, p.v[22] = samples;
+    return p;
+}
+
+// ---- a gameplay frame both eyes share one picture of (3D Mono, or no scene depth) ----
+/// (v1.0.2) RX_VR_MONO_POSE: where its views are. eyes (the default): each eye's own pose, from the head the picture was drawn
+/// for and the eye's located place and turn from the head; head: both at that head, as before
+bool mono_pose_eyes() {
+    static const bool eyes_pose = [] {
+        const char* e = getenv("RX_VR_MONO_POSE");
+        const bool head = e && !std::strcmp(e, "head");
+        if (e && *e) logf("vr: RX_VR_MONO_POSE=%s: a picture both eyes share is sent at %s", e, head ? "the drawn head for both" : "each eye's own pose");
+        return !head;
+    }();
+    return eyes_pose;
+}
+struct SharedPose {   // (this frame's gameplay picture, for the log: tester_log.inc)
+    bool shown = false, own = false, turned = false;   // one picture for both eyes; at each eye's own pose; resampled for its turn
+    bool eye2 = false;
+    XrPosef drawn{};
+    uint32_t w = 0, h = 0;
+} shared_pose;
+bool turned_eye_ready(const Image& picture);   // (flat_eyes.inc)
+void turned_eye_record(const FlatEyePush& push, VkImage dst, uint32_t w, uint32_t h);
+
+/// An eye located from the head (finite, a turn, a place within reach)
+bool eye_pose_usable(const XrView& v) {
+    const XrQuaternionf& q = v.pose.orientation;
+    const XrVector3f& p = v.pose.position;
+    const float n = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w, d = p.x * p.x + p.y * p.y + p.z * p.z;
+    return std::isfinite(n) && std::fabs(n - 1) < 0.01f && std::isfinite(d) && d < 0.04f && std::isfinite(v.fov.angleLeft + v.fov.angleRight +
+           v.fov.angleUp + v.fov.angleDown) && v.fov.angleLeft < v.fov.angleRight && v.fov.angleDown < v.fov.angleUp;
+}
+/// Whether an eye is turned from the head (a canted display): by more than 0.1 degrees
+bool eye_turned(const XrQuaternionf& q) { return q.x * q.x + q.y * q.y + q.z * q.z > 0.000873f * 0.000873f; }
+
+/// An eye's pose for a picture drawn for a head: the head's, with the eye's place from it, and its turn when the picture is
+/// resampled for it
+XrPosef shared_eye_pose(const XrPosef& drawn, const XrPosef& eye, bool turned) {
+    XrPosef p = drawn;
+    const float at[3] = {eye.position.x, eye.position.y, eye.position.z};
+    float world[3];
+    qrot(drawn.orientation, at, world);
+    p.position.x += world[0], p.position.y += world[1], p.position.z += world[2];
+    if (turned) p.orientation = qmul(drawn.orientation, eye.orientation);
+    return p;
+}
+
+/// A turned eye's view of a picture (w x h, symmetric, |P00| p00 and |P11| p11) drawn along the head: the eye's own FOV widened by
+/// guard (or the picture's whole, whole), at the picture's own pixels to a tangent, and the push constants that draw it. The
+/// picture is at infinity (both eyes see one direction at one place): only the turn moves it, and past its edge is black
+FlatEyePush turned_eye_view(const XrPosef& eye, const XrFovf& own, bool whole, float guard, float p00, float p11, uint32_t w, uint32_t h,
+                            XrFovf* fov, XrRect2Di* rect) {
+    const float tx = 1 / p00, ty = 1 / p11;
+    const auto t = [&](float angle, float all) { return whole ? all : std::clamp(std::tan(angle) * guard, -3.0f, 3.0f); };
+    const float l = t(own.angleLeft, -tx), r = t(own.angleRight, tx), u = t(own.angleUp, ty), d = t(own.angleDown, -ty);
+    rect->offset = {0, 0};
+    rect->extent = {std::clamp((int32_t)std::lround((r - l) * p00 * 0.5f * (float)w), 16, (int32_t)w),
+                    std::clamp((int32_t)std::lround((u - d) * p11 * 0.5f * (float)h), 16, (int32_t)h)};
+    *fov = {std::atan(l), std::atan(r), std::atan(u), std::atan(d)};
+    return flat_eye_push(XrPosef{{0, 0, 0, 1}, {0, 0, -1}}, 2 * tx, 2 * ty, XrPosef{eye.orientation, {0, 0, 0}}, *fov,
+                         (float)rect->extent.width, (float)rect->extent.height, 1);
+}
+
 /// Each eye from its slot, for the head now (ke[0] the left eye's, ke[1] the right's: the same slot); true when the views were
 /// filled
 bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerProjectionView views[2]) {
@@ -271,20 +463,9 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
     // (Flat frames (title, cutscenes, other non-gameplay views) are a screen fixed in the room, in front of where you faced when
     // the flat view began: no longer stuck to the head, and kFlatWidthDeg wide instead of the whole view. Gameplay frames that
     // match no drawn pose stay centred on the head. A flat frame is always both eyes' slot.)
-    bool& flat_was = flat_screen.open;
-    static XrPosef flat_pose{{0, 0, 0, 1}, {0, 0, 0}};
     const bool flat = s.slots[ke[0]].head_locked;
-    if (flat) {
-        if (!flat_was) {   // (where it opens: your place and heading then, level; then fixed in the room)
-            const XrQuaternionf q = head.orientation;
-            const float yaw = std::atan2(2 * (q.w * q.y + q.x * q.z), 1 - 2 * (q.x * q.x + q.y * q.y));
-            flat_pose.orientation = {0, std::sin(yaw / 2), 0, std::cos(yaw / 2)};
-            flat_pose.position = head.position;
-            logf("vr: world screen opened %.0f deg wide, %.1f m ahead (heading %.0f deg)", (float)flat_width_deg(),
-                 kFlatScreenMetres, yaw * 57.2958f);
-        }
-    }
-    flat_was = flat;
+    if (flat) flat_place(head);
+    else flat_screen.open = false;
     flat_screen.shown = false;
     struct EyeFrame {
         XrPosef drawn{};
@@ -292,11 +473,20 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
         uint32_t w = 0, h = 0;
         bool projection_ok = false;
         float proj_x = 1, proj_y = 1;
+        bool own = false, turned = false;   // (one picture for both eyes: the view at the eye's own pose, the picture resampled for its turn)
         float layer[2]{};         // where the eye's picture is shown from the drawn head (x right, y up)
     } ef[2];
     WarpPush push[2];
     const uint32_t cap = opts.vr_eye_height > 0 ? (uint32_t)opts.vr_eye_height : 0;
     const float scale = opts.vr_depth_scale / 100.0f;
+    XrPosef eye_pose[2];
+    XrFovf eye_fov[2];
+    bool eye_pose_ok;
+    {
+        std::lock_guard lk(s.pose_mu);
+        eye_pose_ok = s.eye_pose_ok;
+        for (int e = 0; e < 2; e++) eye_pose[e] = s.eye_pose[e], eye_fov[e] = s.eye_fov[e];
+    }
     for (int e = 0; e < 2; e++) {
         Slot& sl = s.slots[ke[e]];
         EyeFrame& f = ef[e];
@@ -318,7 +508,8 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
         const bool fits = sl.head_locked && eyes[e].chain && eyes[e].w >= f.w && eyes[e].h >= f.h;
         if (!fits && !make_eye(e, f.w, f.h)) return false;
         if (!make_image(s.eye_out[e], VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, f.w,
-                        f.h))
+                        f.h) ||
+            !make_image(s.landed[e], VK_FORMAT_R32_UINT, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, f.w, f.h))
             return false;
         // the head's movement since the picture was drawn, in the picture's own frame
         const float dp[3] = {head.position.x - f.drawn.position.x, head.position.y - f.drawn.position.y,
@@ -332,20 +523,28 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
                           sl.proj[14] == -1.0f;
         f.proj_x = f.projection_ok ? std::fabs(sl.proj[0]) : 1.0f;
         f.proj_y = f.projection_ok ? std::fabs(sl.proj[5]) : (f.h ? (float)f.w / (float)f.h : 1.0f);
-        // the depth's distances (fsr3_math.h: d = a + b / v with a = (1 - p22) / 2, b = p23 / 2, the game's -1..1 clip depth)
+        // the depth's distances (fsr3_math.h: d = a + b / v with a = (1 - p22) / 2, b = p23 / 2, the game's -1..1 clip depth).
+        // The game's depth is 0 at the near plane and 1 at the far plane, so the near plane is v at d = 0, -b / a =
+        // p23 / (p22 - 1), and the far plane v at d = 1, b / (1 - a). (Before v1.0.2 the near plane was taken as b / (1 - a):
+        // the far plane, 24672 m for the game's 0.1 to 25000 m, and the warp clamped every distance to it, so From depth
+        // moved nothing on any headset)
         const float a = f.projection_ok ? (1.0f - sl.proj[10]) * 0.5f : 0.0f;
         const float b = f.projection_ok ? sl.proj[11] * 0.5f : 1.0f;
-        const float near_plane = (std::fabs(1.0f - a) > 1e-9f) ? b / (1.0f - a) : 0.05f;
-        if (e == 0 && !sl.head_locked && f.projection_ok) {   // (research, bounded: the near plane the picture was drawn with)
+        const float near_plane = f.projection_ok && std::fabs(sl.proj[10] - 1.0f) > 1e-9f ? sl.proj[11] / (sl.proj[10] - 1.0f) : 0.05f;
+        const float far_plane = f.projection_ok && std::fabs(1.0f - a) > 1e-9f ? b / (1.0f - a) : 0.0f;
+        if (e == 0 && !sl.head_locked && f.projection_ok) {   // (bounded: the planes the picture was drawn with)
             static float said = -1;
             static int lines = 0;
-            if (lines < 40 && std::fabs(near_plane - said) > 0.01f)
-                lines++, said = near_plane, logf("vr: the eyes' picture drawn with its near plane at %.3f m", near_plane);
+            if (lines < 40 && std::fabs(near_plane - said) > 0.001f)
+                lines++, said = near_plane,
+                    logf("vr: the eyes' picture: near %.3f m, far %.1f m", near_plane, far_plane);
         }
         // (a flat frame is shown as it was drawn: on the world screen, a quad fixed in the room, which the compositor turns for
         // the head itself. The depth warp's stereo shift (the eye's half and the head's movement since the screen opened)
         // slid the title's movie inside its own picture, and its uncovered rim moved with the head, headset 22 Nov)
         const bool stereo = !sl.head_locked && opts.vr_stereo != 0 && sl.has_depth;
+        f.own = !sl.head_locked && !stereo && eye_pose_ok && mono_pose_eyes();
+        f.turned = f.own && f.projection_ok && eye_turned(eye_pose[e].orientation);
         // this eye's place from the drawn head (true stereo: from where the eye's own picture was drawn, f.shift)
         const float half = (e ? 0.5f : -0.5f) * s.ipd * (stereo ? scale : 0.0f);
         WarpPush& p = push[e];
@@ -353,13 +552,39 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
         p.out_size[0] = (float)f.w, p.out_size[1] = (float)f.h;
         p.uv_scale[0] = p.uv_scale[1] = 1;
         p.proj[0] = f.proj_x, p.proj[1] = f.proj_y, p.proj[2] = -a, p.proj[3] = b;
-        p.offset[0] = stereo ? half - f.shift + d[0] : 0;
-        p.offset[1] = stereo ? d[1] : 0;
+        // (RX_VR_WARP_HEAD=0: the head's movement since the picture was drawn left to the compositor, the warp makes the eyes'
+        // offset only. With From depth's real near plane the warp moves near things by that movement too, every frame, so
+        // the gaps beside them change every frame: the suspect for a haze round Link's body, 23 Nov)
+        static const bool head_motion = [] {
+            const char* v = getenv("RX_VR_WARP_HEAD");
+            const bool off = v && *v == '0';
+            if (off) logf("vr: RX_VR_WARP_HEAD=0: the eyes' warp leaves the head's movement since the picture to the compositor");
+            return !off;
+        }();
+        if (!head_motion) d[0] = d[1] = d[2] = 0;
+        // (the eyes' offset and the head's movement apart: the warp fades the head's out for points nearer than about
+        // 0.8 m (vr_warp_splat.comp shift_at), which follow the head (Link's body, what his hands hold) and are not fixed in
+        // the world, 23 Nov)
+        p.offset[0] = stereo ? half - f.shift : 0;
+        p.offset[1] = 0;
+        p.head[0] = stereo ? d[0] : 0, p.head[1] = stereo ? d[1] : 0;
         p.steps = (float)std::max(4, opts.vr_quality);
+        // (research: RX_VR_WARP_DEBUG=1, the left eye shows the depth as the warp reads it (lighter nearer) and the right eye
+        // the picture unwarped, both of one frame: what has no depth of its own (drawn after the copy, or without depth)
+        // shows as what is behind it)
+        static const bool depth_view = [] {
+            const char* v = vr_research_getenv("RX_VR_WARP_DEBUG");
+            const bool on = v && *v == '1';
+            if (on) logf("vr: RX_VR_WARP_DEBUG=1 (test): the left eye shows its depth, the right the picture unwarped");
+            return on;
+        }();
+        p.debug = depth_view ? (e == 0 ? 1.0f : 2.0f) : 0.0f;
         p.max_shift = 0.08f;
-        p.near_plane = near_plane > 0 ? near_plane : 0.05f;
+        // (the warp's own near distance, not the camera's: nearer points (Link's hands at the face) are eased onto it, so their
+        // shift stays within what the eye can fuse and the gaps behind them stay small. The game's camera keeps its near plane)
+        p.near_plane = std::max(kWarpNearOf(opts.vr_near_depth), near_plane > 0 ? near_plane : 0.05f);
         f.layer[0] = stereo ? half + d[0] : 0;
-        f.layer[1] = p.offset[1];
+        f.layer[1] = p.head[1];
     }
     // descriptors (the slots' images stay, so once per slot and eye output)
     static uint64_t set_for[kSlots];
@@ -371,11 +596,12 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
         if (set_for[k] == want) continue;
         for (int o = 0; o < 2; o++) {
             const bool own = o == 1 && sl.has_eye2;
-            VkDescriptorImageInfo ii[3] = {{s.linear, own ? sl.color2.view : sl.color.view, VK_IMAGE_LAYOUT_GENERAL},
+            VkDescriptorImageInfo ii[4] = {{s.linear, own ? sl.color2.view : sl.color.view, VK_IMAGE_LAYOUT_GENERAL},
                                            {s.point, own ? sl.depth2.view : sl.depth.view, VK_IMAGE_LAYOUT_GENERAL},
-                                           {VK_NULL_HANDLE, s.eye_out[o].view, VK_IMAGE_LAYOUT_GENERAL}};
-            VkWriteDescriptorSet w3[3];
-            for (int i = 0; i < 3; i++) {
+                                           {VK_NULL_HANDLE, s.eye_out[o].view, VK_IMAGE_LAYOUT_GENERAL},
+                                           {VK_NULL_HANDLE, s.landed[o].view, VK_IMAGE_LAYOUT_GENERAL}};
+            VkWriteDescriptorSet w3[4];
+            for (int i = 0; i < 4; i++) {
                 w3[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 w3[i].dstSet = s.warp_sets[k][o];
                 w3[i].dstBinding = (uint32_t)i;
@@ -383,20 +609,60 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
                 w3[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                 w3[i].pImageInfo = &ii[i];
             }
-            vkUpdateDescriptorSets(dev.device, 3, w3, 0, nullptr);
+            vkUpdateDescriptorSets(dev.device, 4, w3, 0, nullptr);
         }
         set_for[k] = want;
     }
+    FlatEyePush turned_push[2];
+    XrFovf turned_fov[2];
+    XrRect2Di turned_rect[2];
+    if ((ef[0].turned || ef[1].turned) && !turned_eye_ready(s.slots[ke[0]].color)) ef[0].turned = ef[1].turned = false;
+    for (int e = 0; e < 2; e++)
+        if (ef[e].turned)
+            turned_push[e] = turned_eye_view(eye_pose[e], eye_fov[e], !layer_fov_located(), kCameraGuardBand, ef[e].proj_x, ef[e].proj_y,
+                                             ef[e].w, ef[e].h, &turned_fov[e], &turned_rect[e]);
+    shared_pose.shown = !flat && !(opts.vr_stereo != 0 && s.slots[ke[0]].has_depth);
+    shared_pose.turned = ef[0].turned || ef[1].turned, shared_pose.own = ef[0].own;
+    shared_pose.eye2 = s.slots[ke[0]].has_eye2, shared_pose.drawn = ef[0].drawn, shared_pose.w = ef[0].w, shared_pose.h = ef[0].h;
     uint32_t index[2];
     SwapTake take;
     if (!swap_take(take, {eyes[0].chain, eyes[1].chain}, index, "eyes")) return false;
     if (!headset_record()) return swap_give(take), false;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.warp);
     for (int e = 0; e < 2; e++) {
         const EyeFrame& f = ef[e];
+        if (f.turned) {   // (one picture for both eyes, this eye turned from the head: drawn as the turned eye sees it)
+            turned_eye_record(turned_push[e], eyes[e].images[index[e]].image, (uint32_t)turned_rect[e].extent.width,
+                              (uint32_t)turned_rect[e].extent.height);
+            continue;
+        }
+        // (3D Mono, v1.0.2 (opts.vr_stereo 0): a gameplay frame goes to both eyes as the game drew it, a bit copy of the
+        // picture into the swapchain: no warp, the cheapest. A picture made smaller (Eye resolution) still goes through it)
+        const Slot& esl = s.slots[ke[e]];
+        const bool flat_copy = opts.vr_stereo == 0 && !esl.head_locked && f.w == esl.color.w && f.h == esl.color.h;
+        if (flat_copy) {
+            const VkImage dst = eyes[e].images[index[e]].image;
+            barrier(cmd, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkImageCopy c{};
+            c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            c.extent = {f.w, f.h, 1};
+            vkCmdCopyImage(cmd, esl.color.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+            barrier(cmd, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            continue;
+        }
         barrier(cmd, s.eye_out[e].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        // (From depth in two passes: each source pixel landed where the eye sees it, the nearest kept (vr_warp_splat.comp),
+        // then each eye pixel from the one that landed there, or a hole filled from the background (vr_warp.comp))
+        barrier(cmd, s.landed[e].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        const VkClearColorValue none{};
+        const VkImageSubresourceRange all{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdClearColorImage(cmd, s.landed[e].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &none, 1, &all);
+        barrier(cmd, s.landed[e].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.warp_layout, 0, 1, &s.warp_sets[ke[e]][e], 0, nullptr);
         vkCmdPushConstants(cmd, s.warp_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(WarpPush), &push[e]);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.warp_splat);
+        vkCmdDispatch(cmd, (f.w + 7) / 8, (f.h + 7) / 8, 1);
+        memory_barrier(cmd);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.warp);
         vkCmdDispatch(cmd, (f.w + 7) / 8, (f.h + 7) / 8, 1);
         barrier(cmd, s.eye_out[e].image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
         const VkImage dst = eyes[e].images[index[e]].image;
@@ -432,6 +698,7 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
     // instead stretched and squashed the world whenever the game's camera hadn't (yet) taken that FOV.)
     // (A flat frame (title, menus, cutscenes) keeps square pixels: its height follows its width by the picture's own shape, so
     // a 5:4 picture is not stretched to a 16:9 camera's FOV.)
+    bool cut_both = true;   // (each eye's view its own located FOV: the layer line below)
     for (int e = 0; e < 2; e++) {
         const EyeFrame& f = ef[e];
         const float fov_tan_x = flat ? std::tan(flat_width_deg() * 0.5f / 57.2958f)
@@ -454,23 +721,74 @@ bool make_eyes(const int ke[2], int kn, const XrPosef& head, XrCompositionLayerP
         qrot(f.drawn.orientation, lp, world);
         XrPosef pose = f.drawn;
         pose.position.x += world[0], pose.position.y += world[1], pose.position.z += world[2];
+        // (one picture for both eyes: each view at its own eye, from the head the picture was drawn for, so the compositor
+        // still makes up the head's movement since; the picture is at infinity, the same from both)
+        if (f.own) pose = shared_eye_pose(f.drawn, eye_pose[e], f.turned);
         XrCompositionLayerProjectionView& v = views[e];
         v = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
         v.pose = pose;
         v.fov = {-std::atan(fov_tan_x), std::atan(fov_tan_x), std::atan(fov_tan_y), -std::atan(fov_tan_y)};
         v.subImage.swapchain = eyes[e].chain;
         v.subImage.imageRect.extent = {(int32_t)f.w, (int32_t)f.h};
+        // (v1.0.2, gameplay: the eye's own located FOV, its frustum cut from the picture. The picture and the game's camera
+        // stay the symmetric FOV enclosing both eyes; a flat frame keeps the world screen's)
+        if (f.turned) {
+            v.fov = turned_fov[e], v.subImage.imageRect = turned_rect[e];
+        } else if (!flat && f.projection_ok && layer_fov_located()) {
+            XrFovf own;
+            bool ok;
+            {
+                std::lock_guard lk(s.pose_mu);
+                ok = s.eye_fov_ok, own = s.eye_fov[e];
+            }
+            XrFovf cut;
+            XrRect2Di rect;
+            if (ok && located_eye_cut(own, kCameraGuardBand, f.proj_x, f.proj_y, f.w, f.h, &cut, &rect))
+                v.fov = cut, v.subImage.imageRect = rect;
+            else cut_both = false;
+        } else {
+            cut_both = false;
+        }
+    }
+    if (!flat) {   // (said once, and again when it changes (bounded): the layer as submitted, for a player's log)
+        static int lines = 0;
+        static std::string said;
+        char line[800], at[160];
+        const auto deg = [](float a) { return a * 57.2958f; };
+        const Slot& sl = s.slots[ke[0]];
+        if (ef[0].own)
+            snprintf(at, sizeof at, "each eye's own from the drawn head, one picture for both (L %.0f %.0f %.0f mm, R %.0f %.0f %.0f mm%s)",
+                     eye_pose[0].position.x * 1000, eye_pose[0].position.y * 1000, eye_pose[0].position.z * 1000, eye_pose[1].position.x * 1000,
+                     eye_pose[1].position.y * 1000, eye_pose[1].position.z * 1000, shared_pose.turned ? "; turned eyes, resampled" : "");
+        else if (shared_pose.shown) snprintf(at, sizeof at, "the drawn head for both eyes");
+        else snprintf(at, sizeof at, "the drawn head -/+ %.1f mm (3D strength %d%%)", s.ipd * 500, opts.vr_depth_scale);
+        snprintf(line, sizeof line,
+                 "vr: layer: projection, 2 swapchains of %ux%u (%s), one per eye, array index 0; pose: %s; fov %s; L %.1f %.1f %.1f %.1f deg rect %d,%d %dx%d; R %.1f %.1f %.1f %.1f deg rect %d,%d %dx%d; the picture "
+                 "%.1f x %.1f deg",
+                 ef[0].w, ef[0].h, swap_format == VK_FORMAT_R8G8B8A8_SRGB ? "RGBA8 sRGB" : "RGBA8 UNORM", at,
+                 shared_pose.turned ? "located (each turned eye's own)" : cut_both ? "located (each eye's own, kept within the picture)"
+                 : layer_fov_located() ? "symmetric (no located FOV to cut)" : "symmetric (RX_VR_LAYER_FOV)", deg(views[0].fov.angleLeft), deg(views[0].fov.angleRight),
+                 deg(views[0].fov.angleUp), deg(views[0].fov.angleDown), views[0].subImage.imageRect.offset.x,
+                 views[0].subImage.imageRect.offset.y, views[0].subImage.imageRect.extent.width,
+                 views[0].subImage.imageRect.extent.height, deg(views[1].fov.angleLeft), deg(views[1].fov.angleRight),
+                 deg(views[1].fov.angleUp), deg(views[1].fov.angleDown), views[1].subImage.imageRect.offset.x,
+                 views[1].subImage.imageRect.offset.y, views[1].subImage.imageRect.extent.width,
+                 views[1].subImage.imageRect.extent.height, 2 * deg(std::atan(1.0f / ef[0].proj_x)),
+                 2 * deg(std::atan(1.0f / ef[0].proj_y)));
+        if (lines < 20 && said != line) {   // (the 3D's own state, this frame's: the 10 s 3D line has the counts)
+            lines++, said = line;
+            uint32_t sw, sh;
+            {
+                std::lock_guard lk(s.mu);
+                sw = s.scene_w, sh = s.scene_h;
+            }
+            logf("%s; the scene drawn at %ux%u (%u%% of the picture's width); depth copy %s, each eye's own picture %s", line, sw, sh,
+                 ef[0].w ? sw * 100 / ef[0].w : 0, sl.has_depth ? "yes" : "no",
+                 sl.has_eye2 ? "yes" : sl.eyes_mode ? "no (the left eye's for both)" : opts.vr_stereo == 4 ? "no (not a two-eye frame)" : opts.vr_stereo == 0 ? "no (Mono)" : "no (From depth)");
+        }
     }
     if (flat && ef[0].w && ef[0].h) {   // (the world screen: the left eye's picture, the same as the right's, on a quad)
-        const float ahead[3] = {0, 0, -kFlatScreenMetres};
-        float world[3];
-        qrot(flat_pose.orientation, ahead, world);
-        flat_screen.pose = flat_pose;
-        flat_screen.pose.position.x += world[0], flat_screen.pose.position.y += world[1], flat_screen.pose.position.z += world[2];
-        flat_screen.width = 2 * kFlatScreenMetres * std::tan(flat_width_deg() * 0.5f / 57.2958f);
-        flat_screen.height = flat_screen.width * (float)ef[0].h / (float)ef[0].w;
-        flat_screen.w = ef[0].w, flat_screen.h = ef[0].h;
-        flat_screen.shown = true;
+        flat_screen_set(ef[0].w, ef[0].h);
     }
     return true;
 }

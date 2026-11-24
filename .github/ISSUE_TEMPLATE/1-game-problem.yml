@@ -6,16 +6,16 @@ body:
     attributes:
       value: |
         Thanks for testing. Before you start:
-        - **Check the [newest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) first.** Every release includes all the fixes before it, and yours may already be fixed.
+        - **Check this repository's newest release first** (the Releases page). Every release includes all the fixes before it, and yours may already be fixed.
         - **Search the open issues.** If yours is there, add your details to it instead.
         - English, please.
         - **Never attach game files**: no hookshot.exe, image.bin, the `.bin` caches, romfs or exefs files, keys or saves.
   - type: input
     id: version
     attributes:
-      label: Hookshot version
-      description: The version you built (such as `v2.0.0`, shown by the launcher and on the Releases page), or the first line of `hookshot_log.txt` if it starts with `hookshot`.
-      placeholder: v2.0.0
+      label: HookshotVR version
+      description: The version the launcher shows, such as `Alpha v1.0.2`.
+      placeholder: Alpha v1.0.2
     validations:
       required: true
   - type: dropdown
@@ -72,6 +72,50 @@ body:
       placeholder: Ryzen 7 7700, 32 GB, Windows 11
     validations:
       required: true
+  - type: input
+    id: headset
+    attributes:
+      label: Headset and controllers
+      description: Leave empty if you were not in VR.
+      placeholder: Rift S with its Touch controllers
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: OpenXR runtime
+      description: The VR app that was running (the launcher's "VR Runtime" row shows it).
+      options:
+        - Meta / Oculus (Quest Link, Air Link, Rift)
+        - SteamVR
+        - WiVRn
+        - Monado
+        - Virtual Desktop
+        - Other (named under "What happened")
+        - Not in VR
+  - type: dropdown
+    id: stereo
+    attributes:
+      label: 3D mode
+      description: VR menu, General, "3D".
+      options:
+        - Mono
+        - Stereo
+        - Not in VR
+  - type: dropdown
+    id: view
+    attributes:
+      label: View
+      description: VR menu, General, "View" (or the launcher's View setting).
+      options:
+        - First person
+        - Third person
+        - Window
+        - Not in VR
+  - type: input
+    id: render_resolution
+    attributes:
+      label: Render resolution
+      description: In the game's own menu (Insert), the "Render resolution" row, a percentage or Auto.
+      placeholder: Auto, or 100%
   - type: textarea
     id: settings
     attributes:
@@ -90,8 +134,12 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: hookshot_log.txt
-      description: Drag the file here. It is beside hookshot.exe and holds the last run; the four runs before are `hookshot_log.1.txt` (the one before) to `.4.txt`. If you started the game again after the problem, attach `hookshot_log.1.txt` too. It has no game files in it.
+      label: The launcher's logs
+      description: >-
+        In the launcher, Settings › Logs › Open opens the folder (Windows `%LOCALAPPDATA%\HookshotVR\logs`,
+        Linux `~/.local/share/HookshotVR/logs`). Drag `last-run.log` here (add `last-run.1.log` if you started
+        the game again after the problem, and `build.log` for a build problem). They have your user name and
+        home folder taken out and no game files in them, so they are safe to send.
     validations:
       required: true
   - type: textarea

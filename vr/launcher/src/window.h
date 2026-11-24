@@ -8,6 +8,8 @@ namespace win {
 
 // Opens the window. hidden: for --screenshot, nothing shows on the desktop. Width and height are in window units.
 bool open(const char *title, int width, int height, bool hidden);
+// Why the last open failed, in a player's words (SDL2 missing, no display, no OpenGL 3.3), with SDL's own reason
+const char *open_error();
 void close();
 
 // Draw the next frames into an offscreen image of width x height pixels instead of the window (scale: pixels per unit).

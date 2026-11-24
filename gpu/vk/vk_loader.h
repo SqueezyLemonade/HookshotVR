@@ -66,6 +66,7 @@
     X(vkDestroySemaphore)                                                                                             \
     X(vkWaitSemaphores)                                                                                               \
     X(vkGetSemaphoreCounterValue)                                                                                     \
+    X(vkSignalSemaphore)                                                                                              \
     X(vkCreateImageView)                                                                                              \
     X(vkDestroyImageView)                                                                                             \
     X(vkCmdPipelineBarrier2)                                                                                          \

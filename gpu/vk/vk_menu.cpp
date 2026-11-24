@@ -3608,6 +3608,7 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
         if (up != upscaler()) opts.dlss = up;   // (Native in or out: DLAA / DLSS, FSR 4's native AA / FSR 4, XeSS's / XeSS)
         v = ur::full_scale(up) ? *r.value : res;   // (Native changes the mode, not the saved numeric scale)
     }
+    if (r.value == &opts.vr_stereo) v = opts.vr_3d_of(v);   // VR HOOK (the card's value as it is, as a 3D mode offered)
     if (r.value == &opts.output_res) {   // (smallest to largest: step_output_choice)
         v = step_output_choice(*r.value, dir);
         if (v == *r.value) return;
@@ -6254,6 +6255,7 @@ void menu_init() {
                 if (!r.value || r.value == &opts.game_lang || strcmp(line, ini_key(r))) continue;
                 const int v = atoi(eq + 1);
                 *r.value = r.value == &opts.output_res ? parse_output(eq + 1) : std::min(std::max(v, r.lo), r.hi);
+                if (r.value == &opts.vr_stereo) *r.value = opts.vr_3d_of(*r.value);   // VR HOOK (a saved From depth: Mono)
             }
             if (!strncmp(line, "toggle_", 7))
                 for (int i = 0; i < HOS_SW_N; i++)
@@ -7069,6 +7071,7 @@ void mic_test_tick(bool focused) {
     mic_test_state = host && host->mic_test ? host->mic_test(mic_testing, opts.microphone_gain, mic_levels) : 0;
     if (!(mic_test_state & 1)) mic_testing = false;
 }
+namespace { void vrm_key(bool in_front); }   // VR HOOK (vr/menu/vr_menu.inc, below: F2)
 void menu_tick() {
     std::lock_guard lk(menu_mu);   // (the control bridge's settings: menu_setting_set)
     share_finish();   // (Save my pipeline list's worker, done)
@@ -7106,6 +7109,8 @@ void menu_tick() {
             for (int slot = 0; slot < 2 && !bound; slot++) bound = host->binding(HOS_BIND_KEY, b, slot) == VK_F12;
         if (!bound) screenshot_want.store(true, std::memory_order_relaxed);
     }
+    // VR HOOK: F2 opens and closes the VR menu, with no controllers too (vr/menu/vr_menu.inc vrm_key)
+    vrm_key(mine);
     // (hookshot) the gamepads, by position: Home, or Select and Start together, as Insert; the D-pad as the arrows; the
     // buttons the Switch's A and B are bound to as Enter and Esc, as in the game (vk_menu_keys.h; with the Nintendo layout A
     // is the right face button), not while a binding waits for its button

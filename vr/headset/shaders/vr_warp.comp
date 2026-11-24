@@ -2,34 +2,78 @@
 // (OoT VR, vk_vr.cpp) one eye from the game's picture and its scene depth.
 //
 // When the eye moves sideways by offset, a point at view distance z moves on screen by shift = k / z along one direction (k from
-// the projection and the offset). Each output pixel searches back along that direction for the source point whose own shift
-// lands it here; marching from the far end, the first proper match is the nearest surface, the one seen. Where a near edge
-// leaves a gap (the moved eye sees behind it, which the game never drew), the gap is filled from the background side.
+// the projection and the offset). Pass 1 (vr_warp_splat.comp) put each source pixel where it lands, the nearest one kept per
+// output pixel; here each output pixel reads its picture from that source. Where none landed (a crack where a near surface
+// stretches, or a gap behind a near edge, which the game never drew) it takes the nearest surface whose own shift brings it
+// here, so a crack keeps its surface and a gap shows what is behind; where the game's picture has nothing that fits, the
+// farthest point looked at, softened across the gap.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding = 0) uniform sampler2D picture;     // the game's picture
 layout(binding = 1) uniform sampler2D scene_depth; // its scene depth (R32F copy), the same view
 layout(binding = 2, rgba8) uniform writeonly image2D eye_out;
+layout(binding = 3, r32ui) uniform readonly uimage2D landed; // pass 1's: 0, or the nearest source landed here (landed_key)
 
 layout(push_constant) uniform Push {
     vec2 out_size;   // this eye's image, pixels
     vec2 uv_scale;   // output uv to picture uv
     vec4 proj;       // |P00|, |P11|, -a, b: a depth d is at view distance b / (d - a)
     vec4 offset;     // the eye's offset from where the game drew: x right, y up, z back (metres); w 1: the general warp
-    float steps;     // search samples
+    float steps;     // (the general warp's)
     float max_shift; // largest shift, in uv
-    float near;      // the camera's near distance
-    float debug;     // 1 = show the depth instead
+    float near;      // the warp's near distance: nearer points are eased onto it (the shift's soft cap)
+    float debug;     // 1 = show the depth instead, 2 = the picture unwarped (RX_VR_WARP_DEBUG)
+    vec2 head;       // the head's movement since the picture was drawn: x right, y up (metres)
+    vec2 pad;
 } pc;
 
-float distance_at(vec2 uv)
+// (the shift's parts: the eye's offset, and the head's movement since the picture was drawn, faded out for points nearer than
+// about 0.8 m: those follow the head and the hands (Link's body, what he holds), they are not fixed in the world)
+vec2 eye_flow() { return vec2(-pc.proj.x * pc.offset.x, pc.proj.y * pc.offset.y) * 0.5; }
+vec2 head_flow() { return vec2(-pc.proj.x * pc.head.x, pc.proj.y * pc.head.y) * 0.5; }
+float raw_distance(vec2 uv)
 {
     float d = texture(scene_depth, uv).r;
     float den = d + pc.proj.z;
     if (abs(den) < 1e-9)
         return 1e9; // the sky
     float z = pc.proj.w / den;
-    return z > 0.0 ? max(z, pc.near) : 1e9;
+    return z > 0.0 ? z : 1e9;
+}
+// (eased onto the near distance, not cut: (z^4 + near^4)^(1/4) is z beyond about twice it, and near at the eye; the VR menu's
+// Near depth sets it)
+float eased(float z)
+{
+    float z2 = z * z, n2 = pc.near * pc.near;
+    return sqrt(sqrt(z2 * z2 + n2 * n2));
+}
+float distance_at(vec2 uv) { return eased(raw_distance(uv)); }
+// a point at view distance z (as the depth has it) moves by this, in uv
+vec2 shift_at(float z) { return (eye_flow() + head_flow() * smoothstep(0.6, 0.9, z)) / eased(z); }
+// (landed's integer: the shift along dir in its high 16 bits (0: none landed), so imageAtomicMax keeps the nearest; across it
+// in its low 16, in 1/16 px)
+uint landed_key(float t, float across, float px)
+{
+    return (uint(clamp(t / pc.max_shift, 0.0, 1.0) * 65534.0) + 1u) << 16 | uint(clamp(across / px * 16.0 + 32768.0, 0.0, 65535.0));
+}
+float landed_along_dir(uint key) { return float((key >> 16) - 1u) / 65534.0 * pc.max_shift; }
+float landed_across(uint key, float px) { return (float(key & 0xFFFFu) - 32768.0) / 16.0 * px; }
+
+// The first pixel along step from p (at most reach pixels) that a source landed on: its shift in uv, its uv; false: none
+bool landed_along(ivec2 p, vec2 step, int reach, out float t, out vec2 at)
+{
+    for (int i = 1; i <= reach; i++) {
+        ivec2 n = ivec2(floor(vec2(p) + 0.5 + step * float(i)));
+        if (n.x < 0 || n.y < 0 || n.x >= int(pc.out_size.x) || n.y >= int(pc.out_size.y))
+            return false;
+        uint key = imageLoad(landed, n).r;
+        if (key != 0u) {
+            t = landed_along_dir(key);
+            at = (vec2(n) + 0.5) / pc.out_size * pc.uv_scale;
+            return true;
+        }
+    }
+    return false;
 }
 
 // (general warp, offset.w = 1: the eye moved by offset.xyz in any direction, z included, as alternate eyes need when Link walked
@@ -71,6 +115,10 @@ void main()
         return;
     vec2 uv = (vec2(p) + 0.5) / pc.out_size * pc.uv_scale;
 
+    if (pc.debug > 1.5) {   // (2: the picture as it is)
+        imageStore(eye_out, p, texture(picture, uv));
+        return;
+    }
     if (pc.debug > 0.5) {
         float z = distance_at(uv);
         float v = 1.0 / (1.0 + z * 0.25);
@@ -83,38 +131,65 @@ void main()
         return;
     }
 
-    vec2 per_inv_z = vec2(-pc.proj.x * pc.offset.x, pc.proj.y * pc.offset.y) * 0.5;
-    float k = length(per_inv_z);
+    vec2 e = eye_flow(), h = head_flow();
+    float k = length(e) + length(h);   // (the largest shift a point at distance 1 can have)
     if (k < 1e-7) {
         imageStore(eye_out, p, texture(picture, uv));
         return;
     }
-    vec2 dir = per_inv_z / k;
-    float tmax = min(pc.max_shift, k / pc.near);
-    int n = max(int(pc.steps), 4);
-    float dt = tmax / float(n);
-
-    float t_prev = tmax;
-    float s_prev = min(k / distance_at(clamp(uv - dir * tmax, vec2(0.0), pc.uv_scale)), tmax);
-    float g_prev = s_prev - t_prev;
-    float found = -1.0, fill = -1.0;
-    for (int i = n - 1; i >= 0; i--) {
-        float t = dt * float(i);
-        float s = min(k / distance_at(clamp(uv - dir * t, vec2(0.0), pc.uv_scale)), tmax);
-        float g = s - t;
-        if (g_prev < 0.0 && g >= 0.0) {
-            if (abs(s - s_prev) <= 1.5 * dt) {
-                found = mix(t_prev, t, g_prev / (g_prev - g));
-                break;
+    vec2 dir = length(e) > 1e-7 ? normalize(e) : normalize(h), side = vec2(-dir.y, dir.x);
+    uint key = imageLoad(landed, p).r;
+    vec2 src = uv;
+    float px = pc.uv_scale.x / pc.out_size.x;
+    if (key != 0u) {
+        src = uv - dir * landed_along_dir(key) - side * landed_across(key, px);   // (the one source that landed here, the nearest)
+    } else {
+        // a hole: what the moved eye sees behind a near edge, which the game never drew. Its background is the side whose
+        // landed source is the farther (the smaller shift), looked for both ways along dir: never the nearer one, whichever
+        // eye and whichever side the near surface is on
+        vec2 walk = -dir / max(abs(dir.x), abs(dir.y));   // (one pixel along -dir, in the larger axis)
+        int reach = int(ceil(min(pc.max_shift, k / pc.near) / pc.uv_scale.x * pc.out_size.x)) + 2;
+        float tb, tf;
+        vec2 ub, uf;
+        bool back = landed_along(p, walk, reach, tb, ub), front = landed_along(p, -walk, reach, tf, uf);
+        if (back || front) {
+            // what the moved eye sees here: the nearest surface whose own shift brings it here, looked for from the nearer
+            // neighbour's shift down to none. In a crack inside a near surface (where it stretches) that is the surface
+            // itself; in a gap behind a near edge the near surface does not land here, and the search goes on to what is
+            // behind: the background where the game's picture shows it, or what lies behind that (the ground behind a rock
+            // next to Link's arm). None: the farthest point looked at. (Before, 23 Nov: mirrored from the farther neighbour's
+            // edge, and when that neighbour was itself in front of the real background the gap filled with its colour, the
+            // rock's white shards; cracks were told from gaps by their sides' shifts, and a slanted arm's were not)
+            // (one step a pixel, up to 96: with 24 steps over an 80 px gap the match's tolerance was about 6 px, and the fill
+            // took the rock on one row and the grass on the next, teeth along the edge, 23 Nov)
+            float tg = back && front ? max(tb, tf) : back ? tb : tf;
+            const int kLook = clamp(int(ceil(tg / px)), 1, 96);
+            float dt = tg / float(kLook), zg = 0.0;
+            vec2 far_src = uv - dir * tg;
+            float far_z = -1.0;
+            bool found = false;
+            for (int i = 0; i <= kLook && !found; i++) {
+                float tc = tg - dt * float(i);
+                vec2 s = clamp(uv - dir * tc, vec2(0.0), pc.uv_scale);
+                float zr = raw_distance(s), z = eased(zr), ts = clamp(dot(shift_at(zr), dir), 0.0, pc.max_shift);
+                if (abs(ts - tc) <= dt + px) src = s, zg = z, found = true;
+                else if (z > far_z) far_z = z, far_src = s;
             }
-            if (fill < 0.0)
-                fill = t_prev;
+            if (!found) src = far_src, zg = far_z;
+            // (softened across the fill, the background's samples only: 2 px either side where it was found, 2 to 8 px where
+            // it was not, so one row's guess does not stand out from the next one's as a stripe)
+            vec2 side = vec2(-dir.y, dir.x) * (2.0 * px);
+            vec4 sum = texture(picture, clamp(src, vec2(0.0), pc.uv_scale));
+            float n = 1.0;
+            for (int s = -4; s <= 4; s++) {
+                if (s == 0 || (found && abs(s) > 1)) continue;
+                vec2 q = clamp(src + side * float(s), vec2(0.0), pc.uv_scale);
+                if (distance_at(q) >= 0.85 * zg) sum += texture(picture, q), n += 1.0;
+            }
+            imageStore(eye_out, p, sum / n);
+            return;
         }
-        t_prev = t;
-        s_prev = s;
-        g_prev = g;
     }
-    float t = found >= 0.0 ? found : fill >= 0.0 ? fill : 0.0;
-    vec2 src = clamp(uv - dir * t, vec2(0.0), pc.uv_scale);
+    src = clamp(src, vec2(0.0), pc.uv_scale);
     imageStore(eye_out, p, texture(picture, src));
 }

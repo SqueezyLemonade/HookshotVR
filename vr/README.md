@@ -28,7 +28,7 @@ They are included there in a fixed order and are not compiled on their own. `.cp
 |---|---|
 | `headset/` | `vk_vr.cpp` is the entry point/index. Named sections cover the runtime, GPU resources, head poses, eye rendering, frame loop/capture, markers and host bridge; `shaders/` contains depth conversion and reprojection |
 | `camera/` | The game camera driven by your head (`view_host.c`), field of view and detail/foliage distance (`detail_host.c`), crawl spaces (`crawl_host.c`), culling around the eye (`culling_host.c`) |
-| `stereo/` | 3D: true stereo (both eyes drawn every frame) |
+| `stereo/` | 3D: Stereo (both eyes drawn every frame; Mono, the default, sends one picture to both eyes) |
 | `body/` | `vk_vr_body.cpp` is the single rig entry point. Its ordered sections contain the pose, cache and skin replacement. `tracking.inc` converts headset/controller poses into game-world body inputs; it is included by the headset entry point |
 | `items/bow/` | The bow: controls, the game patch that steers the arrow, and the hidden flat reticle |
 | `items/slingshot/` | The Fairy Slingshot: the bow's controls and shot in another shape, held at the game's grip, aimed from the pouch through the fork |
@@ -39,7 +39,7 @@ They are included there in a fixed order and are not compiled on their own. `.cp
 | `items/boomerang/` | Child Link's Boomerang in the VR hands: the game's own throw and flight, aimed by the holding hand, the empty hand or the headset (`boomerang_host.c`, the game hook in `vr_game_hooks.py`), its model in the hand (`held_boomerang.inc`), its reticle (`boomerang_reticle.inc`) |
 | `items/ocarina/` | The ocarina: drawn at the front left of the VR belt and in the VR hand that takes it (`held_ocarina.inc`); held to the mouth it starts the game's own ocarina mode, its notes and song menu are the game's buttons, letting go or taking it away stops it (`ocarina_host.c`); the two messages between them (`ocarina_bridge.inc`, `ocarina_bridges_host.c`); the Song effects row (`song_effects.inc`) |
 | `input/` | `openxr_controllers.inc` reads raw OpenXR input. `controllers_host.c` maps it to game buttons; the other files handle movement sticks and quick select |
-| `menu/` | **The VR menu** (hold the left Menu button): its layout, controls and drawing (`vr_menu.inc`, in the Insert menu's file), the panel in the world and its pointers (`vr_menu_layer.inc`, `vr_menu_api.inc`); every setting (`vr_tab_rows.inc`: none on a tab of Hookshot's own menu; VR on or off is decided at the start, `HOOKSHOT_VR`), how its values show (`vr_values_menu.inc`) and their defaults and built-in values (`vr_options.inc`); the radial item wheel (`radial_*`) |
+| `menu/` | **The VR menu** (hold the left Menu button or Y half a second, or F2): its layout, controls and drawing (`vr_menu.inc`, in the Insert menu's file), the panel in the world and its pointers (`vr_menu_layer.inc`, `vr_menu_api.inc`); every setting (`vr_tab_rows.inc`: none on a tab of Hookshot's own menu; VR on or off is decided at the start, `HOOKSHOT_VR`), how its values show (`vr_values_menu.inc`) and their defaults and built-in values (`vr_options.inc`); the radial item wheel (`radial_*`) |
 | `diagnostics/` | `cost_draw.inc`: the replay's CPU time per shader program (`RX_VR_PROG_COST=1`), a performance meter, kept while the frame-rate work goes on; the other research tools were retired as their work finished |
 | `third_party/` | The OpenXR headers (Khronos, Apache-2.0 or MIT) |
 | `tools/` | `build.sh` (build the game with the mod), `test.py` (the master tester) and `generate/` (below) |
@@ -81,7 +81,7 @@ missing or not one they understand, the build stops with a message naming it. Ne
 | How the Boomerang is held, aimed or thrown (the three throw styles) | `items/boomerang/boomerang_host.c` (the put-away is one function there: `vr_boomerang_put_away`) |
 | Where the ocarina hangs on the belt, or how it sits in the hand | `items/ocarina/held_ocarina.inc` (`kOcarinaBeltAngle`; the hand's grip is the game's own, learned when Link first plays it) |
 | How close to the mouth plays the ocarina, which control is which note, the song menu | `items/ocarina/ocarina_host.c` (the distances are named at the top) |
-| 3D strength or true stereo | `stereo/vk_vr_eyes.cpp` |
+| 3D strength or Stereo | `stereo/vk_vr_eyes.cpp` |
 | Where the game calls the mod | `vr_game_hooks.py` (changing it means the next build translates the game again, about 40 minutes) |
 
 ## Build and test

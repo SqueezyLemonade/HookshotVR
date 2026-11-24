@@ -24,7 +24,7 @@ XrQuaternionf yaw_inverse(XrQuaternionf q) {
     return {0, std::sin(-yaw / 2), 0, std::cos(-yaw / 2)};
 }
 
-void publish_pose(const XrPosef& head) {
+void publish_pose(const XrPosef& head, XrTime time) {
     std::lock_guard lk(s.pose_mu);
     const int recenter = opts.vr_recenter;
     if (!s.have_ref || recenter != s.recenter_seen) {
@@ -34,7 +34,7 @@ void publish_pose(const XrPosef& head) {
     Pose& p = s.poses[++s.pose_seq % kPoses];
     p = Pose{};
     p.seq = s.pose_seq;
-    p.pose = head;
+    p.pose = head, p.time = time;
 }
 
 /// The pose the game drew a camera with: the drawn view nearest to the camera's view (its rows from vp = proj * view); seq:

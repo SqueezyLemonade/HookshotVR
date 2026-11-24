@@ -343,18 +343,28 @@ ImGuiKey key_of(int scancode) {
 
 namespace win {
 
+static char open_why[512];
+const char *open_error() { return open_why; }
+static bool open_failed(const char *what, const char *detail) {
+    snprintf(open_why, sizeof open_why, "%s%s%s", what, detail && *detail ? ": " : "", detail ? detail : "");
+    return false;   // (said by the caller: plat::error_box)
+}
+
 bool open(const char *title, int width, int height, bool hidden) {
-    if (!load_sdl()) {
-        fprintf(stderr, "launcher: SDL2 not found (libSDL2-2.0.so.0 / SDL2.dll)\n");
-        return false;
-    }
+    if (!load_sdl()) return open_failed("SDL2 was not found (libSDL2-2.0.so.0, SDL2.dll beside the launcher)", "");
     sdl.SetHint("SDL_VIDEO_X11_NET_WM_BYPASS_COMPOSITOR", "0");   // (a plain window: the desktop's compositor stays on)
     sdl.SetHint("SDL_VIDEO_X11_WMCLASS", "HookshotVR");
     sdl.SetHint("SDL_VIDEO_WAYLAND_WMCLASS", "HookshotVR");
-    if (sdl.Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "launcher: SDL_Init: %s\n", sdl.GetError());
-        return false;
+#ifndef _WIN32
+    {   // (no display: SDL may still start, on a driver without a screen, and the launcher ran on unseen. A hidden window, for
+        // --screenshot and --icon, may: SDL_VIDEODRIVER=offscreen draws them)
+        const char *x = getenv("DISPLAY"), *w = getenv("WAYLAND_DISPLAY"), *d = getenv("SDL_VIDEODRIVER");
+        if (!hidden && (!x || !*x) && (!w || !*w) && !(d && *d))
+            return open_failed("no display to open a window on (DISPLAY and WAYLAND_DISPLAY are not set): start the launcher from "
+                               "your desktop", "");
     }
+#endif
+    if (sdl.Init(SDL_INIT_VIDEO) != 0) return open_failed("the window system could not be started", sdl.GetError());
     sdl.GL_SetAttribute(GL_MAJOR_, 3);
     sdl.GL_SetAttribute(GL_MINOR_, 3);
     sdl.GL_SetAttribute(GL_PROFILE_, 1);   // (core)
@@ -368,16 +378,10 @@ bool open(const char *title, int width, int height, bool hidden) {
     }
     uint32_t flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (hidden ? SDL_WINDOW_HIDDEN : 0);
     window = sdl.CreateWindow(title, (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED, width, height, flags);
-    if (!window) {
-        fprintf(stderr, "launcher: window: %s\n", sdl.GetError());
-        return false;
-    }
+    if (!window) return open_failed("the window could not be opened", sdl.GetError());
     sdl.SetWindowMinimumSize(window, 640, 410);
     context = sdl.GL_CreateContext(window);
-    if (!context || !load_gl()) {
-        fprintf(stderr, "launcher: OpenGL 3.3: %s\n", sdl.GetError());
-        return false;
-    }
+    if (!context || !load_gl()) return open_failed("OpenGL 3.3 is not available (update your graphics driver)", sdl.GetError());
     sdl.GL_SetSwapInterval(1);
     cursor_arrow = sdl.CreateSystemCursor(0);
     cursor_hand = sdl.CreateSystemCursor(11);

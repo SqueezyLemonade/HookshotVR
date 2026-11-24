@@ -1,0 +1,83 @@
+#version 450
+// (OoT VR, vk_vr.cpp) From depth, pass 1 of 2 (vr_warp.comp is pass 2): every pixel of the game's picture moved to where the
+// eye's offset puts it, a point at view distance z moving by t = k / z along one direction. Where several land on one pixel the
+// nearest one wins (the largest shift: imageAtomicMax), so each output pixel has exactly one source, or none (a hole: what the
+// moved eye sees behind a near edge, which the game never drew; pass 2 fills it from the background side).
+// (Before v1.0.2 each output pixel searched back for its source in 8 fixed steps over the whole range a near plane of 0.1 m
+// allows, up to 230 px: steps of about 29 px matched the wrong surface at every step, the headset's ghost copies of Link, one
+// more per 10% of 3D strength, the spikes at near edges and the comb along repeating borders, 23 Nov)
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D picture;     // the game's picture
+layout(binding = 1) uniform sampler2D scene_depth; // its scene depth (R32F copy), the same view
+layout(binding = 2, rgba8) uniform writeonly image2D eye_out;
+layout(binding = 3, r32ui) uniform uimage2D landed; // per output pixel: 0, or the nearest source landed there (landed_key)
+
+layout(push_constant) uniform Push {
+    vec2 out_size;   // this eye's image, pixels
+    vec2 uv_scale;   // output uv to picture uv
+    vec4 proj;       // |P00|, |P11|, -a, b: a depth d is at view distance b / (d - a)
+    vec4 offset;     // the eye's offset from where the game drew: x right, y up, z back (metres); w 1: the general warp
+    float steps;     // (the general warp's)
+    float max_shift; // largest shift, in uv
+    float near;      // the warp's near distance: nearer points are eased onto it (the shift's soft cap)
+    float debug;     // 1 = show the depth instead
+    vec2 head;       // the head's movement since the picture was drawn: x right, y up (metres)
+    vec2 pad;
+} pc;
+
+// (the shift's parts: the eye's offset, and the head's movement since the picture was drawn, faded out for points nearer than
+// about 0.8 m: those follow the head and the hands (Link's body, what he holds), they are not fixed in the world)
+vec2 eye_flow() { return vec2(-pc.proj.x * pc.offset.x, pc.proj.y * pc.offset.y) * 0.5; }
+vec2 head_flow() { return vec2(-pc.proj.x * pc.head.x, pc.proj.y * pc.head.y) * 0.5; }
+float raw_distance(vec2 uv)
+{
+    float d = texture(scene_depth, uv).r;
+    float den = d + pc.proj.z;
+    if (abs(den) < 1e-9)
+        return 1e9; // the sky
+    float z = pc.proj.w / den;
+    return z > 0.0 ? z : 1e9;
+}
+// (eased onto the near distance, not cut: (z^4 + near^4)^(1/4) is z beyond about twice it, and near at the eye; the VR menu's
+// Near depth sets it)
+float eased(float z)
+{
+    float z2 = z * z, n2 = pc.near * pc.near;
+    return sqrt(sqrt(z2 * z2 + n2 * n2));
+}
+float distance_at(vec2 uv) { return eased(raw_distance(uv)); }
+// a point at view distance z (as the depth has it) moves by this, in uv
+vec2 shift_at(float z) { return (eye_flow() + head_flow() * smoothstep(0.6, 0.9, z)) / eased(z); }
+// (landed's integer: the shift along dir in its high 16 bits (0: none landed), so imageAtomicMax keeps the nearest; across it
+// in its low 16, in 1/16 px)
+uint landed_key(float t, float across, float px)
+{
+    return (uint(clamp(t / pc.max_shift, 0.0, 1.0) * 65534.0) + 1u) << 16 | uint(clamp(across / px * 16.0 + 32768.0, 0.0, 65535.0));
+}
+float landed_along_dir(uint key) { return float((key >> 16) - 1u) / 65534.0 * pc.max_shift; }
+float landed_across(uint key, float px) { return (float(key & 0xFFFFu) - 32768.0) / 16.0 * px; }
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= int(pc.out_size.x) || p.y >= int(pc.out_size.y) || pc.offset.w > 0.5 || pc.debug > 0.5)
+        return;
+    vec2 e = eye_flow(), h = head_flow();
+    if (length(e) + length(h) < 1e-7)
+        return;
+    vec2 dir = length(e) > 1e-7 ? normalize(e) : normalize(h), side = vec2(-dir.y, dir.x);
+    vec2 uv = (vec2(p) + 0.5) / pc.out_size * pc.uv_scale;
+    // (the nearest depth of the 3 x 3 depth texels round it: the depth is drawn at the Render resolution, below the picture's,
+    // so a near edge's own pixels (its anti-aliased rim) had the background's depth and stayed behind as a thin outline)
+    vec2 texel = 1.0 / vec2(textureSize(scene_depth, 0));
+    float z = 1e9;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++)
+            z = min(z, raw_distance(uv + vec2(i, j) * texel));
+    vec2 s = shift_at(z);
+    float t = clamp(dot(s, dir), 0.0, pc.max_shift), across = dot(s, side), px = pc.uv_scale.x / pc.out_size.x;
+    ivec2 q = ivec2(floor((uv + dir * t + side * across) / pc.uv_scale * pc.out_size));
+    if (q.x >= 0 && q.y >= 0 && q.x < int(pc.out_size.x) && q.y < int(pc.out_size.y))
+        imageAtomicMax(landed, q, landed_key(t, across, px));
+}

@@ -1084,10 +1084,13 @@ SW(RX_VR_FLAT_EDGE, diag, string, "off: the swapchain outside a flat picture lef
 #ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
 SW(RX_VR_FLAT_INSET, diag, int, "2 px", "(Hookshot VR, research builds only) A test: the world screen's quad (a flat frame on a quad: the Window view's menus) shows its picture inset this many pixels, 0-64, for the edge pixels that move with the head (vr/headset/eye_rendering.inc).")
 #endif
+SW(RX_VR_FLAT_LAYER, kill, string, "eyes: the world screen drawn into each eye at its own located pose and FOV", "(Hookshot VR) How a flat frame (the title, menus, movies) goes to the headset. projection: one picture for both eyes at the screen's fixed pose and one narrow FOV, as before v1.0.2. quad: a quad fixed in the room. For an A/B on a runtime where flat frames look doubled or wrong; the log says what was sent and where the eyes were located (vr/headset/flat_eyes.inc).")
 #ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
 SW(RX_VR_HUD_LOG, diag, bool, "off", "(Hookshot VR, research builds only) Logs each program and vertex count drawn in the HUD layer, once.")
 #endif
+SW(RX_VR_LAYER_FOV, kill, string, "located: each eye's projection view at its own located FOV (widened 3%), its frustum cut from the picture", "(Hookshot VR) symmetric: every eye's view at the picture's whole symmetric FOV, enclosing both eyes, as before v1.0.2; for an A/B on a runtime whose stereo looks wrong (vr/headset/eye_rendering.inc located_eye_cut).")
 SW(RX_VR_MENU_169, kill, bool, "on", "(Hookshot VR) A full-screen 2D menu (the title, the file select, the pause menu) is shown flat on the world screen as the middle 16:9 of the picture, where VR has the game draw every menu, without the HUD size (vr/headset/frame_capture.inc menu_tick). 0: off, as before.")
+SW(RX_VR_MONO_POSE, kill, string, "eyes: each eye's own pose from the head the picture was drawn for, the picture resampled for eyes turned from the head", "(Hookshot VR) Where a gameplay frame whose eyes share one picture (3D Mono, or no scene depth) is sent. head: both views at the drawn head, as before v1.0.2; for an A/B on a runtime where the picture looks doubled or wrong (vr/headset/eye_rendering.inc shared_eye_pose, turned_eye_view).")
 SW(RX_VR_NO_BRACELET, kill, bool, "off: the Goron Bracelet drawn on the VR arm", "(Hookshot VR) 1: the bracelet left to the game, as without VR (vr/items/gear/equipment_host.c, equipment_skin.inc).")
 SW(RX_VR_NO_OCARINA, kill, bool, "off: the ocarina held in the VR hands (the VR tab's row)", "(Hookshot VR) 1: the ocarina left to the game, as without VR, whatever the VR tab says (vr/items/ocarina/held_ocarina.inc).")
 #ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
@@ -1117,6 +1120,10 @@ SW(RX_VR_TELEPORT_LOG_MS, diag, int, "2000 ms", "(Hookshot VR, research builds o
 #ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
 SW(RX_VR_TELEPORT_START, diag, string, "the map's own name with RX_VR_TELEPORT_BANC", "(Hookshot VR, research builds only) The start point with RX_VR_TELEPORT_BANC (- for none).")
 #endif
+#ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
+SW(RX_VR_WARP_DEBUG, diag, bool, "off: each eye its picture", "(Hookshot VR, research builds only) 1: the left eye shows the depth From depth's warp reads (lighter nearer) and the right eye the picture unwarped, of one frame, to see what has no depth of its own (vr/headset/eye_rendering.inc).")
+#endif
+SW(RX_VR_WARP_HEAD, kill, bool, "on: the eyes' warp also moves the picture by the head's movement since it was drawn", "(Hookshot VR) 0: From depth's warp makes the eyes' offset only, the head's movement since the picture left to the compositor (each eye's layer at the drawn head), to A/B a haze round near things (vr/headset/eye_rendering.inc).")
 #ifdef HOOKSHOT_VR_RESEARCH   // (read only in a research build: nx2/build.py VR_RESEARCH)
 SW(RX_VR_WINDOW_LAYER, diag, string, "off: one projection layer, each eye at its own pose and FOV", "(Hookshot VR, research builds only) quad: the Window view as one quad layer per eye at the frame instead (its first build), to compare on a runtime (vr/headset/window_view.inc).")
 #endif

@@ -37,6 +37,8 @@ struct Controls {
     HandState shared[2];
     uint32_t seq = 0;
     std::string profile[2];
+    std::string menu_name = "menu", upper_name = "Y";   // (pose_mu: name_menu_buttons; empty: not on this controller)
+    bool pads = false;             // (pose_mu: its sticks are trackpads)
     Eye marker[4];                 // blue/red controllers, white bow reticle, green palm socket
     bool marker_ready[4]{};
 } ctl;
@@ -136,7 +138,9 @@ void make_controls() {
     };
     // Every table binds the same actions as Quest Touch's, but for the gaps a controller's buttons leave (vr/tools/test.py
     // check_controller_tables): the VR menu on the left Menu button (held), the radial wheels on the stick clicks, jump on
-    // the right stick up. The layouts: docs/vr-knowledge/research/controller-layouts.md.
+    // the right stick up. The VR menu also opens and closes on the left upper button held (Y; Index: B), read from upper
+    // (vr/input/controllers_host.c vr_menu_y_step): SteamVR keeps Touch's left Menu for its dashboard, and binding Y
+    // to menu as well would make a quick Y the game's Plus. The layouts: docs/vr-knowledge/research/controller-layouts.md.
     // Quest 1/2/3/3S, Rift S (the tested layout)
     suggest("/interaction_profiles/oculus/touch_controller", nullptr, {
         {ctl.grip, "/user/hand/left/input/grip/pose"}, {ctl.grip, "/user/hand/right/input/grip/pose"},
@@ -173,7 +177,8 @@ void make_controls() {
         {ctl.upper, "/user/hand/left/input/y/click"}, {ctl.upper, "/user/hand/right/input/b/click"},
         {ctl.menu, "/user/hand/left/input/menu/click"},
         {ctl.haptic, "/user/hand/left/output/haptic"}, {ctl.haptic, "/user/hand/right/output/haptic"}});
-    // Valve Index: A/B on both hands; no Menu button (System is SteamVR's), so the left trackpad pressed firmly is Menu
+    // Valve Index: A/B on both hands; no Menu button (System is SteamVR's), so the left trackpad pressed firmly is Menu (its
+    // tap the game's Plus, its hold the VR menu); the left B is the upper button, whose hold is the VR menu's too
     suggest("/interaction_profiles/valve/index_controller", nullptr, {
         {ctl.grip, "/user/hand/left/input/grip/pose"}, {ctl.grip, "/user/hand/right/input/grip/pose"},
         {ctl.aim, "/user/hand/left/input/aim/pose"}, {ctl.aim, "/user/hand/right/input/aim/pose"},
@@ -364,6 +369,78 @@ void update_controls(XrTime t) {
     }
 }
 
+/// A runtime's name for a button, as the hints show it: "Y Button" is Y, "Left Menu Button" menu. Empty when it cannot be
+/// shown (not ASCII: the menu's font; too long for a row)
+std::string short_button_name(std::string n) {
+    for (char c : n)
+        if (c < 32 || c > 126) return "";
+    auto cut = [&](size_t at, size_t len, const char* word) {
+        if (n.size() <= len || at > n.size() - len) return;
+        for (size_t i = 0; i < len; i++)
+            if (std::tolower((unsigned char)n[at + i]) != word[i]) return;
+        n.erase(at, len);
+    };
+    while (!n.empty() && n.back() == ' ') n.pop_back();
+    if (n.size() > 7) cut(n.size() - 7, 7, " button");
+    cut(0, 5, "left ");
+    if (n.size() > 12) return "";
+    if (n.size() > 1)
+        for (char& c : n) c = (char)std::tolower((unsigned char)c);
+    return n;
+}
+/// Our own names for a profile's Menu and left upper button (make_controls' tables); empty: that controller has none
+void own_button_names(const std::string& profile, std::string& menu, std::string& upper) {
+    menu = "menu", upper = "Y";
+    if (profile == "/interaction_profiles/valve/index_controller") menu = "trackpad", upper = "B";
+    else if (profile == "/interaction_profiles/htc/vive_controller" || profile == "/interaction_profiles/khr/simple_controller" ||
+             profile == "/interaction_profiles/microsoft/motion_controller")
+        upper = "";
+}
+/// The left hand's source bound to an action: how many (-1: the runtime does not say), and the first one's name
+int bound_button(XrAction a, std::string& name) {
+    name.clear();
+    if (!a || !xr_bound_sources || !xr_source_name) return -1;
+    XrBoundSourcesForActionEnumerateInfo info{XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+    info.action = a;
+    uint32_t n = 0;
+    if (XR_FAILED(xr_bound_sources(s.session, &info, 0, &n, nullptr))) return -1;
+    std::vector<XrPath> paths(n);
+    if (n && XR_FAILED(xr_bound_sources(s.session, &info, n, &n, paths.data()))) return -1;
+    paths.resize(std::min<size_t>(n, paths.size()));
+    int left = 0;
+    for (XrPath p : paths) {
+        char buf[XR_MAX_PATH_LENGTH] = "";
+        uint32_t m = 0;
+        if (XR_FAILED(xrPathToString(s.inst, p, sizeof buf, &m, buf)) || std::strstr(buf, "/user/hand/right")) continue;
+        left++;
+        XrInputSourceLocalizedNameGetInfo gi{XR_TYPE_INPUT_SOURCE_LOCALIZED_NAME_GET_INFO};
+        gi.sourcePath = p, gi.whichComponents = XR_INPUT_SOURCE_LOCALIZED_NAME_COMPONENT_BIT;
+        if (name.empty() && XR_SUCCEEDED(xr_source_name(s.session, &gi, 0, &m, nullptr)) && m) {
+            std::string got(m, 0);
+            if (XR_SUCCEEDED(xr_source_name(s.session, &gi, m, &m, got.data()))) name = short_button_name(got.c_str());
+        }
+    }
+    return left;
+}
+/// The names of what opens the VR menu, for its hint (menu_hint): the runtime's for what is bound now, the player's own
+/// rebinding in it included, else ours for the profile. With no controller the last ones stay
+void name_menu_buttons() {
+    const std::string& profile = ctl.profile[0];
+    if (profile.empty() || profile == "(none)") return;
+    std::string menu, upper, own_menu, own_upper;
+    own_button_names(profile, own_menu, own_upper);
+    const int menus = bound_button(ctl.menu, menu), uppers = bound_button(ctl.upper, upper);
+    const bool said = menus >= 0 && uppers >= 0 && menus + uppers > 0;   // (neither bound: a runtime that does not list them)
+    if (!said || (menus && menu.empty())) menu = own_menu;
+    if (!said || (uppers && upper.empty())) upper = own_upper;
+    const bool pads = profile == "/interaction_profiles/htc/vive_controller";
+    std::lock_guard lk(s.pose_mu);
+    if (menu == ctl.menu_name && upper == ctl.upper_name && pads == ctl.pads) return;
+    ctl.menu_name = menu, ctl.upper_name = upper, ctl.pads = pads;
+    logf("vr: controllers: the VR menu's buttons: menu \"%s\", left upper \"%s\" (%s names)", menu.c_str(), upper.c_str(),
+         said ? "the runtime's" : "our own");
+}
+
 /// The interaction profile the runtime picked for each hand (logged when it changes)
 void note_profiles() {
     if (!ctl.attached) return;
@@ -379,4 +456,5 @@ void note_profiles() {
             logf("vr: controllers: %s hand uses %s%s", h ? "right" : "left", buf, tested ? "" : " (untested: tested is Quest Touch)");
         }
     }
+    name_menu_buttons();
 }

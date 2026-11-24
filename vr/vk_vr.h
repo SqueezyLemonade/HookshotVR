@@ -66,10 +66,13 @@ void menu_ready(VkCommandBuffer cmd);
 void menu_hidden();
 
 // ---- (OoT VR) the VR menu: the mod's own settings, a panel floating in the world (vr/menu/vr_menu.inc draws it on the present's
-// thread, vr/menu/vr_menu_layer.inc shows it in the headset). Held left Menu button: host_api.inc hookshot_vr_menu ----
+// thread, vr/menu/vr_menu_layer.inc shows it in the headset). Held left Menu button or Y: host_api.inc hookshot_vr_menu ----
 /// Open: the game side gets the controllers' buttons, triggers and sticks let go meanwhile (host_api.inc)
 bool panel_open();
 void panel_set_open(bool open);
+/// What opens and closes it on this controller, by the buttons' own names: "Hold left menu or Y"; value: as the Menu button
+/// row's value, "Menu or Y" (vr/input/openxr_controllers.inc name_menu_buttons)
+std::string menu_hint(bool value);
 /// Opens or closes it; false when it cannot open now (Hookshot's own menu is open)
 bool panel_toggle();
 /// (the Window view, vr/headset/window_view.inc) whether its Move mode changed the window's options since last asked: the
@@ -211,6 +214,9 @@ void menu_tick(bool menu);
 bool menu_169();
 /// The present's submit: a timeline signal to add (false: none this present)
 bool present_signal(VkSemaphoreSubmitInfo& out);
+/// (no window, vk_replay.cpp's offscreen copy) present's slot is ready once the replay's timeline reaches main_value: signalled
+/// from the CPU by the headset thread, as no present submit takes present_signal
+void present_done_at(uint64_t main_value);
 
 /// A controller pose expressed in the game's world axes. The grip basis columns are its local +x, +y and +z axes.
 struct LinkHand {
@@ -271,6 +277,8 @@ void body_draw_report();
 /// pass into it is the scene's depth prepass, not a shadow map); and whether the scene's depth is known at all
 bool scene_depth_is(const Texture* depth);
 bool scene_depth_known();
+/// (vr/headset/frame_capture.inc) whether a texture is this frame's scene colour (vk_draw.cpp: the gameplay upscale's input)
+bool scene_color_is(const Texture* color);
 /// (vk_draw.cpp via skin_draw.inc) one of Link's first-person draws, for the 10 s counts and the blink lines (vk_vr_body.cpp):
 /// what became of it, whether its pass draws colour, and the frame
 enum class LinkDraw { Posed, RecentPose, Equipment, Refused, NearNative, ShadowHidden, HeadHidden, Count };
@@ -427,6 +435,8 @@ enum {
     HOOKSHOT_VR_BTN_MENU = 8,      // the left menu button
     HOOKSHOT_VR_BTN_TRIGGER = 16,  // the trigger pressed past 85%
     HOOKSHOT_VR_BTN_GRIP = 32,     // the grip pressed past 85%
+    HOOKSHOT_VR_BTN_MENU2 = 64,    // (the game side's) this hand's part of the VR menu's other button (its Menu button row: the
+                                   // left upper button, or both stick clicks), also while the menu is open
 };
 struct HookshotVrHand {
     int valid;                     // tracked this frame

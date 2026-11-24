@@ -1,5 +1,6 @@
 // system.h's settings, folders, builder and game: the same on every platform (what differs is platform.h's).
 #include "system.h"
+#include "update.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,6 +174,7 @@ void load_config(Config &c) {
         else if (k == "game_folder") c.game_folder = v.empty() ? "main-game" : v;
         else if (k == "logs_folder") c.logs = v;
         else if (k == "game_file") c.game_file = v;
+        else if (k == "asked_shortcut") c.asked_shortcut = v == "1";
     }
 }
 void save_config(const Config &c) {
@@ -193,7 +195,8 @@ void save_config(const Config &c) {
           << "hookshotvr_folder=" << c.hookshotvr << "\n"
           << "game_folder=" << c.game_folder << "\n"
           << "logs_folder=" << c.logs << "\n"
-          << "game_file=" << c.game_file << "\n";
+          << "game_file=" << c.game_file << "\n"
+          << "asked_shortcut=" << (c.asked_shortcut ? 1 : 0) << "\n";
         if (!f) return;
     }
     std::error_code e;
@@ -454,6 +457,70 @@ static bool has_line(const std::string &file, const char *start) {
     return false;
 }
 
+// (v1.0.2) The game's View, as the VR menu's View card stores it (vr/menu/vr_menu.inc vrm_set): view= 1 first person, 0 third
+// person, with window_view= 1 for the Window. The settings file the game reads: the user folder's, else (before the game's
+// first start with --user) the game folder's, which the game carries over
+static std::string options_file(const Paths &p) {
+    bool pass = false;
+    const std::string user = join(plat::game_user_dir(&pass), "hookshot_options.ini");
+    return pass && exists(user) ? user : join(p.game, "hookshot_options.ini");
+}
+// One option's value in it, -1 when not set
+int read_option(const Paths &p, const char *key) {
+    std::ifstream f(P(options_file(p)));
+    const std::string start = std::string(key) + "=";
+    std::string line;
+    int v = -1;
+    while (std::getline(f, line))
+        if (line.rfind(start, 0) == 0) v = atoi(line.c_str() + start.size());
+    return v;
+}
+// Options set in it, every other line kept as it is (one whole write)
+bool write_options(const Paths &p, const std::vector<std::pair<std::string, int>> &set) {
+    const std::string path = options_file(p);
+    if (!is_dir(parent(path))) return false;
+    std::ifstream in(P(path));
+    std::string line, out;
+    std::vector<bool> done(set.size());
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        for (size_t i = 0; i < set.size(); i++)
+            if (line.rfind(set[i].first + "=", 0) == 0) line = set[i].first + "=" + std::to_string(set[i].second), done[i] = true;
+        out += line + "\n";
+    }
+    in.close();
+    for (size_t i = 0; i < set.size(); i++)
+        if (!done[i]) out += set[i].first + "=" + std::to_string(set[i].second) + "\n";
+    const std::string tmp = path + ".new";
+    {
+        std::ofstream f(P(tmp), std::ios::binary);
+        f << out;
+        if (!f) return false;
+    }
+    std::error_code e;
+    fs::rename(P(tmp), P(path), e);   // (whole or not at all, as the game's own save)
+    return !e;
+}
+int read_view(const Paths &p) {
+    const int view = read_option(p, "view");
+    if (view < 0) return -1;
+    return view == 1 ? kViewFirst : read_option(p, "window_view") > 0 ? kViewWindow : kViewThird;
+}
+bool write_view(const Paths &p, int v) {
+    return write_options(p, {{"view", v == kViewFirst ? 1 : 0}, {"window_view", v == kViewWindow ? 1 : 0}});
+}
+int read_3d(const Paths &p) {   // (not set: the game's default)
+    int v = read_option(p, "3d");
+    v = GameVrOptions::vr_3d_of(v < 0 ? GameVrOptions().vr_stereo : v);
+    return v == 4 ? k3dStereo : v == 1 ? k3dFromDepth : k3dMono;
+}
+bool write_3d(const Paths &p, int v) { return write_options(p, {{"3d", v == k3dStereo ? 4 : v == k3dFromDepth ? 1 : 0}}); }
+int read_menu_button(const Paths &p) {   // (not set: the game's default; held to its range as the game's own reading is)
+    const int v = read_option(p, "vr_menu_button");
+    return (v < 0 ? GameVrOptions().vr_menu_button : v) > 0 ? kMenuSticks : kMenuY;
+}
+bool write_menu_button(const Paths &p, int v) { return write_options(p, {{"vr_menu_button", v == kMenuSticks ? 1 : 0}}); }
+
 Env game_env(const Paths &p, const Config &c, bool vr, const Runtime &r) {
     // What the game needs from its launcher, the reasons kept short. No VRAM budget (RX_VK_VRAM_MB): every card gets
     // Hookshot's own
@@ -499,16 +566,41 @@ std::vector<std::string> game_args(const Paths &) {
     return {};
 }
 
+// <logs>/last-run.log kept as last-run.1.log, the ones before as .2 to .5 (kRunsKept in all), the oldest dropped; a free
+// number takes its neighbour, so none is dropped before they are all in use. A log that cannot be moved (Windows: still
+// open) moves none of the others
+static void keep_run_logs(const std::string &logs) {
+    auto name = [&](int n) { return join(logs, n ? "last-run." + std::to_string(n) + ".log" : "last-run.log"); };
+    const std::string moving = join(logs, "last-run.moving.log");
+    std::error_code ec;
+    if (!exists(name(0))) return;
+    fs::rename(P(name(0)), P(moving), ec);
+    if (ec) return;
+    int last = 1;
+    while (last < kRunsKept - 1 && exists(name(last))) last++;
+    for (int n = last; n > 1; n--) fs::rename(P(name(n - 1)), P(name(n)), ec);
+    fs::rename(P(moving), P(name(1)), ec);
+}
+
+// The log's first line: which launcher started the game and with which VR Runtime. No paths: the logs are sent as they are
+static std::string started_by(const Config &c, bool vr, const Runtime &r) {
+    std::string line = std::string("launcher: HookshotVR ") + upd::kVersionName + ", ";
+    if (!vr) return line + "VR off\n";
+    line += std::string("VR on, VR Runtime ") + runtime_key(c.runtime) + ": " + (r.found ? r.name.empty() ? "no name" : r.name : "not found");
+    if (r.set_env.empty() && inherited_runtime_json()) line += " (XR_RUNTIME_JSON set outside the launcher)";
+    return line + "\n";
+}
+
 bool launch_game(const Paths &p, const Config &c, bool vr, const Runtime &r, Proc *game, std::string *err) {
     if (!p.game_built) {
         if (err) *err = "Not built";
         return false;
     }
     make_dirs(p.logs);
-    std::string log = join(p.logs, "last-run.log");
-    std::error_code ec;
-    if (exists(log)) fs::rename(P(log), P(join(p.logs, "last-run.1.log")), ec);
     if (!plat::prepare_game(p.game_bin, err)) return false;
+    keep_run_logs(p.logs);
+    const std::string log = join(p.logs, "last-run.log");
+    std::ofstream(P(log), std::ios::binary) << started_by(c, vr, r);   // (made new; the game's output is added to it)
     std::vector<std::string> argv{p.game_bin};
     for (auto &a : game_args(p)) argv.push_back(a);
     Proc pr = plat::spawn(argv, game_env(p, c, vr, r), p.game, plat::Out::File, log);

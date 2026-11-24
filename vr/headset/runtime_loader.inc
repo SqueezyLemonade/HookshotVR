@@ -40,6 +40,10 @@ PFN_xrGetInstanceProcAddr xr_proc = nullptr;
 PFN_xrCreateInstance xr_create_instance = nullptr;
 PFN_xrRequestExitSession xr_request_exit = nullptr;   // (optional: vr::close asks the session's end with it, where there is one)
 
+// (optional: the buttons' own names, vr/input/openxr_controllers.inc name_menu_buttons; without them ours are shown)
+PFN_xrEnumerateBoundSourcesForAction xr_bound_sources = nullptr;
+PFN_xrGetInputSourceLocalizedName xr_source_name = nullptr;
+
 bool load_loader() {
 #ifdef _WIN32
     HMODULE m = LoadLibraryA("openxr_loader.dll");
@@ -63,5 +67,8 @@ bool load_functions(XrInstance inst) {
 #undef XRX_LOAD
     if (ok && (XR_FAILED(xr_proc(inst, "xrRequestExitSession", (PFN_xrVoidFunction*)&xr_request_exit)) || !xr_request_exit))
         xr_request_exit = nullptr;   // (a runtime without it: closed without asking, vr::close)
+    if (ok && (XR_FAILED(xr_proc(inst, "xrEnumerateBoundSourcesForAction", (PFN_xrVoidFunction*)&xr_bound_sources)) ||
+               XR_FAILED(xr_proc(inst, "xrGetInputSourceLocalizedName", (PFN_xrVoidFunction*)&xr_source_name))))
+        xr_bound_sources = nullptr, xr_source_name = nullptr;
     return ok;
 }

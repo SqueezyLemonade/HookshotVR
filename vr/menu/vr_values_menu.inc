@@ -1,4 +1,4 @@
-// Hookshot VR: How the VR settings' values are shown (the VR menu's) (tx_vr_*: "True stereo", "Auto", "64 mm", ...).
+// Hookshot VR: How the VR settings' values are shown (the VR menu's) (tx_vr_*: "Stereo", "Auto", "64 mm", ...).
 //
 // A piece of gpu/vk/vk_menu.cpp, included there at its VR HOOK (it uses that file's types and helpers). Not compiled on its own.
 // (OoT VR) the VR settings' values
@@ -21,6 +21,7 @@ const char* tx_vr_item_get(int v) { return v ? "In front of you" : "Over your he
 const char* tx_vr_radial_place(int v) { return v ? "In front" : "At the hand"; }
 const char* tx_vr_wrist_hud(int v) { return v == 2 ? "Full" : v == 1 ? "Simple" : "Off"; }
 const char* tx_vr_wrist_size(int v) { return v == 2 ? "Large" : v == 1 ? "Medium" : "Small"; }
+const char* tx_vr_menu_button(int v) { return v ? "Both sticks" : "Menu or Y"; }
 const char* tx_vr_menu_position(int v) { return v ? "Follows your head" : "Fixed in world"; }
 const char* tx_vr_turn_style(int v) { return v ? "Snap" : "Smooth"; }
 const char* tx_vr_snap_angle(int v) {
@@ -78,9 +79,10 @@ const char* tx_vr_cone(int v) {
 const char* tx_vr_string_input(int v) { return v == 1 ? "Trigger" : v == 2 ? "Grip" : "Grip or trigger"; }
 const char* tx_vr_mode(int v) { return v ? "First person" : "Third person"; }
 const char* tx_vr_move(int v) { return v ? "Headset" : "Camera"; }
-const char* tx_vr_stereo(int v) {
-    return v == 4 ? "True stereo" : "From depth";   // (the two 3D modes: 1 and 4, the numbers they always had in the ini)
-}
+// (the 3D modes, as the ini's 3d= has them: vr_options.inc's vr_stereo, with the switch that offers From depth)
+constexpr int kVr3dMono = 0, kVr3dFromDepth = 1, kVr3dStereo = 4;
+const char* tx_vr_stereo(int v) { return v == kVr3dStereo ? "Stereo" : v == kVr3dMono ? "Mono" : "From depth"; }
+const char* tx_vr_near_depth(int v) { return v == 2 ? "Full" : v == 1 ? "Medium" : "Low"; }
 const char* tx_vr_height(int v) {
     static char b[16];
     if (v <= 0) return "Auto";

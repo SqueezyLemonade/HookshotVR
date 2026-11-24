@@ -17,7 +17,9 @@
     // (OoT VR, vk_vr.cpp; the VR menu's)
     int vr = 0;             // the headset this run: set once at the start, as HOOKSHOT_VR (else vr= in the ini) asks (no row:
                             // vr/headset/runtime_session.inc instance_extensions)
-    int vr_mode = 0;        // 0 third person (game orbit camera), 1 first person (Link's eyes)
+    int vr_mode = 1;        // 0 third person (game orbit camera), 1 first person (Link's eyes): first person by default
+                            // (v1.0.2: players started in third person and could not find the switch). Saved as view= with
+                            // these values, so a file that has its line keeps it
     int vr_window = 0;      // View -> Window: third person (vr_mode 0) seen through a frame fixed in the room
                             // (vr/headset/window_view.inc)
     int vr_window_room = 0; // around the window: 0 dark, 1 the room (passthrough, where the runtime offers it)
@@ -34,8 +36,15 @@
     int vr_window_eye_camera = 0; // (experimental) the game's camera turned from your head to the window's middle
     int vr_window_back = 0;       // the window seen from behind: 0 nothing (the room or dark), 1 a dark panel
     int vr_move_head = 0;   // first-person movement follows 0 camera, 1 headset heading
-    int vr_stereo = 1;      // 3D: each eye from the picture and its depth
+    // 3D (the ini's 3d=): 0 Mono, both eyes one picture; 4 Stereo, the game drawing both eyes; 1 From depth, each eye made from
+    // the picture and its depth. From depth is not offered since v1.0.2 (its gaps beside near things), but its warp, shaders
+    // and settings stay for later: THE ONE SWITCH that offers it again is vr_from_depth, read by the VR menu's card, the saved
+    // value and the launcher (vr/launcher/src/system.h includes this file). Not offered, a saved 1 loads as Mono
+    static constexpr bool vr_from_depth = false;
+    int vr_stereo = 0;      // (the default: Mono)
+    static constexpr int vr_3d_of(int v) { return v == 4 ? 4 : vr_from_depth && v != 0 ? 1 : 0; }   // (a value as an offered mode)
     int vr_depth_scale = 100;   // 3D strength in percent (the eye distance in the game, times yours)
+    int vr_near_depth = 0;      // Near depth (From depth): 0 Low, 1 Medium, 2 Full: how far near things stand out
     static constexpr int vr_level = 1;       // straight ahead is level (the game camera's tilt dropped)
     int vr_height = 0;      // first-person eye height above adult Link's root, cm (child Link's scaled from it, x125/160); 0: 160
     int vr_body_depth = 0;  // first-person Link body placement relative to the headset, cm (+ ahead, - behind)
@@ -149,6 +158,8 @@
     static constexpr int vr_eyes_particles = 1;   // (true stereo) effects and particles moved for each eye (STE-26); 0 flat, as before
     static constexpr int vr_eyes_fog = 1;     // (true stereo) the volumetric fog grid made for each eye (STE-25; costs ~12% fps)
     static constexpr int vr_eyes_camera = 1;  // (true stereo) the lighting and shadow passes with each eye's camera (STE-28)
+    int vr_menu_button = 0; // what opens and closes the VR menu besides the left Menu button, held: 0 the left upper button (Y),
+                            // 1 both stick (or trackpad) clicks together (vr/input/controllers_host.c)
     int vr_menu_position = 0; // the VR menu (vr/menu/vr_menu_layer.inc): 0 fixed in the world where it opened, 1 follows your head
     int vr_turn_style = 0;   // first person, the right stick: 0 a smooth turn (as before), 1 snap turns (vr/camera/view_host.c, option 1030)
     int vr_snap_angle = 1;   // a snap turn: 0 30, 1 45, 2 60, 3 90 degrees (option 1031)

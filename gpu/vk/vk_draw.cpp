@@ -11261,6 +11261,28 @@ bool fsr3_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
     }
     return fsr3_upscale(cmd, p.key, gameplay_network(p.key), in, input_view, out, output_view, level);
 }
+/// (OoT VR) Whether a dispatch is the game's gameplay upscale, after which the world is in the scene's depth (its copy,
+/// vr::scene_done, and true stereo's second eye with it): the 4/3 network and the full-size pass by their keys, the other
+/// shares' networks (67% 6676619641320ba7, 58%, 50%, 33%) by the shape temporal_stand_in finds them by, a cooperative-matrix
+/// network sampling one texture into one image, that texture being this frame's scene colour (vr::scene_color_is). Before,
+/// only the two keys: below 75% no frame had depth and both eyes saw one picture in both 3D modes (Rift CV1 at 67%, v1.0.1)
+static bool vr_scene_network(const NvnState& s, const Program& p) {
+    if (gameplay_network(p.key)) return true;
+    if (p.stages.empty()) return false;
+    const Stage& st = p.stages[0];
+    if (!(st.info.uses_cooperative_matrix && st.info.texture_descriptors.size() == 1 && st.info.image_descriptors.size() == 1))
+        return false;
+    Texture* in = nullptr;
+    const uint32_t in_handle = handle_of(s, st, st.info.texture_descriptors[0], 0);
+    if (in_handle) texture_view_of(in_handle, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Sample, VK_FORMAT_UNDEFINED, &in);
+    if (!vr::scene_color_is(in)) return false;
+    static std::atomic<uint64_t> told{0};
+    static std::atomic<int> lines{0};
+    if (told.exchange(p.key) != p.key && lines.fetch_add(1) < 8)
+        logf("vr: network %016llx is the gameplay upscale (its input the scene's %ux%u colour): the scene's depth copied after it",
+             (unsigned long long)p.key, in->width, in->height);
+    return true;
+}
 /// (hookshot) A temporal upscaler (NVIDIA DLSS, AMD FSR 4: vk_temporal.cpp) in place of the gameplay upscale network, when
 /// one is on and its inputs are as expected: the network's input as it samples it, its output's storage view
 bool temporal_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
@@ -13728,7 +13750,7 @@ void dispatch_one(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint
             logf("%s", line);
         }
     }
-    if ((vr::active() || vr::eyes_wanted()) && gameplay_network(p.key)) {   // (OoT VR: the world is in the scene's depth now: its copy)
+    if ((vr::active() || vr::eyes_wanted()) && vr_scene_network(s, p)) {   // (OoT VR: the world is in the scene's depth now: its copy)
         end_pass(cmd);
         vr::scene_done(cmd);
         descriptors_disturbed();

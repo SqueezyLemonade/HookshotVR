@@ -60,6 +60,7 @@ enum : unsigned {
     kVrmWindow = 128,      // (greyed unless View is Window: "Window view only")
     kVrmFree = 256,        // (hidden unless Keep 16:9 is off)
     kVrmThirdPerson = 512, // (greyed in first person: "Third person only"; Window view is third person)
+    kVrm3d = 1024,         // (hidden when 3D is Mono)
 };
 struct VrmCard {
     const char* label;
@@ -102,8 +103,11 @@ const VrmRow vrm_play[] = {
     {"View", &opts.vr_mode, VrmKind::cards, 0, nullptr, nullptr,
      {{"First person", "Your own view, as Link.", 1}, {"Third person", "The game\xE2\x80\x99s camera, behind Link.", 0},
       {"Window Beta", "Through a frame in your room", 2}}},   // (2: third person, opts.vr_window: vrm_card_now)
-    {"3D", &opts.vr_stereo, VrmKind::cards, 0, nullptr, nullptr,
-     {{"From depth", "Faster.", 1, "@depth"}, {"True stereo", "Sharper depth, slower.", 4, "@stereo"}}},
+    {"3D", &opts.vr_stereo, VrmKind::cards, 0, nullptr, nullptr,   // (From depth between them when vr_options.inc offers it)
+     {{"Mono", "Both eyes the same. Faster.", kVr3dMono, "@mono"},
+      opts.vr_from_depth ? VrmCard{"From depth", "Depth from one picture.", kVr3dFromDepth, "@depth"}
+                         : VrmCard{"Stereo", "Each eye its own. Slower.", kVr3dStereo, "@stereo"},
+      opts.vr_from_depth ? VrmCard{"Stereo", "Each eye its own. Slower.", kVr3dStereo, "@stereo"} : VrmCard{}}},
 };
 const VrmRow vrm_window[] = {   // (the Window view's frame: vr/headset/window_view.inc)
     VRM_WORDS("Background", vr_window_room, kVrmWindow, "Dark|Room"),
@@ -148,7 +152,8 @@ const VrmRow vrm_body[] = {
     VRM_STEP("Item wheel opens", vr_radial_place, kFP),
 };
 const VrmRow vrm_controls[] = {   // (Hookshot VR's own controls, first, each action and how it is done; then the game's buttons)
-    VRM_INFO("Menu", "Hold left menu"),
+    VRM_INFO("Menu", "Hold left menu or Y"),
+    VRM_STEP("Menu button", vr_menu_button, 0),
     VRM_INFO("Items wheel", "Left stick click"),
     VRM_INFO("Gear wheel", "Right stick click"),
     VRM_INFO("Walk", "Left stick"),
@@ -210,7 +215,8 @@ const VrmRow vrm_item_get[] = {
 const VrmRow vrm_picture[] = {
     VRM_STEP("Eye resolution", vr_eye_height, 0),
     VRM_STEP("Depth quality", vr_quality, kVrmFromDepth),
-    VRM_STEP("3D strength", vr_depth_scale, 0),   // (both 3D modes: vk_vr_eyes.cpp and eye_rendering.inc read it)
+    VRM_STEP("3D strength", vr_depth_scale, kVrm3d),   // (Stereo and From depth: vk_vr_eyes.cpp and eye_rendering.inc read it)
+    VRM_STEP("Near depth", vr_near_depth, kVrmFromDepth),   // (eye_rendering.inc kWarpNearOf)
 };
 const VrmRow vrm_distance[] = {
     VRM_STEP("Detail distance", vr_detail, 0),
@@ -262,7 +268,7 @@ Row* vrm_row_of(const int* value) {
 }
 /// Hidden: its switch, in the same section, is off
 bool vrm_hidden(const VrmRow& r) {
-    return ((r.when & kVrmFromDepth) && opts.vr_stereo == 4) || ((r.when & kVrmReticle) && !opts.vr_bow_preview) ||
+    return ((r.when & kVrmFromDepth) && opts.vr_stereo != kVr3dFromDepth) || ((r.when & kVrm3d) && opts.vr_stereo == kVr3dMono) || ((r.when & kVrmReticle) && !opts.vr_bow_preview) ||
            ((r.when & kVrmPull) && !opts.vr_bomb_pull) || ((r.when & kVrmSnap) && opts.vr_turn_style != 1) ||
            ((r.when & kVrmSmooth) && opts.vr_turn_style == 1) || ((r.when & kVrm3dCutscenes) && opts.vr_events != 2) ||
            ((r.when & kVrmFree) && opts.vr_window_169);
@@ -314,6 +320,7 @@ std::string vrm_value_text(const VrmRow& r) {
     const Row* row = vrm_row_of(r.value);
     if (!row) return "";
     const int v = *r.value;
+    if (r.value == &opts.vr_menu_button) return vr::menu_hint(true);   // (the controller's own names)
     if (r.labels) {
         int k = (v - row->lo) / std::max(1, row->step);
         const char* p = r.labels;
@@ -322,6 +329,8 @@ std::string vrm_value_text(const VrmRow& r) {
     }
     return row->text ? row->text(v) : std::to_string(v);
 }
+/// An info row's words: the Menu row's are the controller's own button names
+std::string vrm_info_words(const VrmRow& r) { return strcmp(r.name, "Menu") ? std::string(r.button) : vr::menu_hint(false); }
 constexpr const char* kVrmVrControlsHelp =
     "How each action is done with the VR controllers, in first person: the hands do what the game's buttons would.";
 constexpr const char* kVrmControlsHelp =
@@ -383,6 +392,7 @@ struct VrmState {
     int tab = 0, sec[kVrmTabs]{}, row = 0, card = 0;
     int focus = 2;                     // (0 the tabs, 1 the sections, 2 the rows)
     bool select_was = false, back_was = false, trigger_was[2]{};
+    bool y_was = false, y_pressed = false;   // (vrm_y_tap)
     int stick_dir = 0;                 // (the stick's direction held: 1 up, 2 down, 3 left, 4 right; 0 none)
     int64_t stick_next = 0;
     int pointer = 1;                   // (the hand that pointed last)
@@ -521,6 +531,15 @@ const VrmHit* vrm_hit_at(float x, float y) {
     return nullptr;
 }
 
+/// Y (the left upper button) down or not: Back as a press made in the menu is let go. Held, it closes the menu first (from any
+/// level: vr/input/controllers_host.c vr_menu_y_step); a Y still held from opening it is no press
+bool vrm_y_tap(bool y) {
+    const bool tap = !y && vrm.y_was && vrm.y_pressed;
+    vrm.y_pressed = y && (vrm.y_pressed || !vrm.y_was);
+    vrm.y_was = y;
+    return tap;
+}
+
 /// One reading of the controllers while it is open (each present)
 void vrm_input() {
     vr::PanelHand hands[2];
@@ -530,11 +549,12 @@ void vrm_input() {
     }
     for (int h = 0; h < 2; h++) vrm.hands[h] = hands[h];
     const int64_t now = prof_now();
-    // (A and X select, B and Y go back: either controller's face buttons)
+    // (A and X select, B goes back, and Y as it is let go: either controller's face buttons)
     const bool select = ((hands[0].buttons | hands[1].buttons) & HOOKSHOT_VR_BTN_LOWER) != 0;
-    const bool back = ((hands[0].buttons | hands[1].buttons) & HOOKSHOT_VR_BTN_UPPER) != 0;
+    const bool back = (hands[1].buttons & HOOKSHOT_VR_BTN_UPPER) != 0;
     if (select && !vrm.select_was) vrm_select();
-    if (back && !vrm.back_was) vrm_back();
+    const bool y_tap = vrm_y_tap((hands[0].buttons & HOOKSHOT_VR_BTN_UPPER) != 0);
+    if ((back && !vrm.back_was) || y_tap) vrm_back();
     vrm.select_was = select, vrm.back_was = back;
     // (the stick pushed furthest: a move, then again after 0.4 s held, 8 a second)
     float x = 0, y = 0;
@@ -842,7 +862,10 @@ bool vrm_icon_shapes(const VrmPen& p, const char* key) {
             const float o = i * .15f;
             p.poly({{.5f, .14f + o}, {.88f, .3f + o}, {.5f, .46f + o}, {.12f, .3f + o}}, i == 1);
         }
-    } else if (k == "stereo") {   // (True stereo: two eyes' views overlapping)
+    } else if (k == "mono") {   // (Mono: one picture, the same for both eyes)
+        p.frame(.16f, .26f, .84f, .74f, .03f, 4);
+        p.line(.3f, .5f, .7f, .5f, 4.5f);
+    } else if (k == "stereo") {   // (Stereo: two eyes' views overlapping)
         p.ring(.36f, .5f, .25f, 4.5f), p.ring(.64f, .5f, .25f, 4.5f);
         p.disc(.36f, .5f, .07f), p.disc(.64f, .5f, .07f);
     } else {
@@ -966,9 +989,10 @@ void vrm_draw(ImDrawList* d, float ox, float oy, float k) {
             }
             const float bx1 = x1 - 12, by0 = cy - 24, by1 = cy + 24;
             if (r.kind == VrmKind::info) {   // (its words where the other rows show their values: nothing to press)
+                const std::string words = vrm_info_words(r);
                 float px = 28;
-                while (px > 16 && g.width(px, r.button) > 250) px -= 1;
-                g.text_mid(px, bx1 - 46 - 10 - 125 - g.width(px, r.button) / 2, cy, hexc(0xF0DEC2), r.button);
+                while (px > 16 && g.width(px, words.c_str()) > 250) px -= 1;
+                g.text_mid(px, bx1 - 46 - 10 - 125 - g.width(px, words.c_str()) / 2, cy, hexc(0xF0DEC2), words.c_str());
             } else if (r.kind == VrmKind::action) {   // (its button centred where the other rows show their values)
                 const float w = std::max(200.0f, g.width(25, r.button) + 48), bc = bx1 - 46 - 10 - 125;
                 if (sel) g.glow(bc - w / 2, by0, bc + w / 2, by1, 8, 12, .6f);
@@ -1069,6 +1093,7 @@ uint64_t vrm_signature() {
     mix(opts.vr_mode), mix(opts.vr_stereo), mix(opts.vr_bow_preview), mix(opts.vr_bomb_pull), mix(opts.vr_window);
     const VrmSection& s = vrm_section();
     for (int i = 0; i < s.n; i++) mix(s.rows[i].value ? *s.rows[i].value : 0);
+    for (const char c : vr::menu_hint(false)) mix(c);   // (a controller changed: its names)
     return hsh;
 }
 
@@ -1095,6 +1120,18 @@ void vrm_test_step() {
     }
 }
 
+/// (menu_tick) F2 on the keyboard opens and closes the VR menu, as F12 takes its screenshot: with the window in front, not
+/// while a control waits for its key or a text field has the keyboard (the key is theirs then), and not once a game control
+/// is F2. Needs no controller; with VR off it does nothing. The press is taken either way, so none is kept for later
+void vrm_key(bool in_front) {
+    if (!host || !host->take_key_press || !host->take_key_press(VK_F2)) return;
+    if (!in_front || listening || editing || !vr::active()) return;
+    for (int b = 0; host->binding && b < HOS_KEY_N; b++)
+        for (int slot = 0; slot < 2; slot++)
+            if (host->binding(HOS_BIND_KEY, b, slot) == VK_F2) return;
+    if (vr::panel_toggle()) logf("vr: F2: the VR menu %s", vr::panel_open() ? "opens" : "closes");
+}
+
 /// Each present: opened or closed since the last, the controllers, and whether to draw it again. true: draw it now
 bool vrm_tick(bool force) {
     vrm_test_step();
@@ -1106,7 +1143,7 @@ bool vrm_tick(bool force) {
     if (open != vrm.was_open) {
         vrm.was_open = open;
         vrm.drawn = 0;
-        vrm.select_was = vrm.back_was = true;   // (a button held as it opens is not a press)
+        vrm.select_was = vrm.back_was = vrm.y_was = true, vrm.y_pressed = false;   // (a button held as it opens is not a press)
         vrm.trigger_was[0] = vrm.trigger_was[1] = true;
         vrm.stick_dir = 5;                       // (nor a stick held)
         if (!open) {

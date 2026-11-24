@@ -32,7 +32,26 @@ struct Config {
     std::string game_folder = "main-game";   // the build in the Hookshot Folder that Play starts (an update makes a new one)
     std::string logs;               // Logs: empty = the data folder's logs/
     std::string game_file;          // the .nup / .nx chosen at the first start
+    bool asked_shortcut = false;    // (Linux) the first start's "Add to menu and desktop?" answered, either way
 };
+// The game's View in its settings file (hookshot_options.ini's view= and window_view=), for the launcher's Settings: read
+// back (-1: not set, the game's own default) and written before a launch, so it can be chosen without a controller
+enum { kViewFirst = 0, kViewThird = 1, kViewWindow = 2 };
+struct Paths;
+int read_view(const Paths &p);
+bool write_view(const Paths &p, int view);
+// The VR menu's 3D the same way (3d=), as the game takes it: its defaults and the modes it offers are the game's own file
+struct GameVrOptions {
+#include "../../menu/vr_options.inc"
+};
+enum { k3dMono = 0, k3dStereo = 1, k3dFromDepth = 2 };   // (From depth last: offered only with vr_from_depth)
+constexpr int k3dModes = GameVrOptions::vr_from_depth ? 3 : 2;
+int read_3d(const Paths &p);
+bool write_3d(const Paths &p, int mode);
+// The VR menu's Menu button the same way (vr_menu_button=): the left Menu button opens it in every choice
+enum { kMenuY = 0, kMenuSticks = 1 };
+int read_menu_button(const Paths &p);
+bool write_menu_button(const Paths &p, int v);
 std::string config_path();
 void load_config(Config &c);
 void save_config(const Config &c);
@@ -101,6 +120,7 @@ struct VrState {
     Check headset = Check::Unknown;
     bool can_start = false;           // Start With is set, and its app is not running yet
     bool none_installed = false;      // (not found: no runtime at any usual install path either)
+    int servers = 0;                  // (WiVRn: its servers running; two or more, and D-Bus may answer for the wrong one)
 };
 // What the main screen calls the runtime: WiVRn, SteamVR, Monado, else its manifest's own name
 std::string runtime_label(const Runtime &r);
@@ -140,7 +160,9 @@ bool poll_check(bool *ok, std::string *text);
 // The game's environment for the chosen mode (system.cpp, README.md's table)
 Env game_env(const Paths &p, const Config &c, bool vr, const Runtime &r);
 std::vector<std::string> game_args(const Paths &p);
-// Starts the game in its folder, its output to <logs>/last-run.log (the run before kept as last-run.1.log)
+// Starts the game in its folder, its output to <logs>/last-run.log (the runs before kept as last-run.1.log, the latest, to
+// last-run.5.log), its first line which launcher and VR Runtime started it
+constexpr int kRunsKept = 6;
 bool launch_game(const Paths &p, const Config &c, bool vr, const Runtime &r, Proc *game, std::string *err);
 bool game_exited(Proc &game, int *code);
 // Crash records the game left (<game>/bug-reports/pending/report-*.txt), copied into <logs>/crashes

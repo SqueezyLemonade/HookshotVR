@@ -145,8 +145,10 @@ Proc spawn(const std::vector<std::string> &argv, const Env &env, const std::stri
     HANDLE rd = nullptr, wr = nullptr;
     if (out == Out::Pipe && !CreatePipe(&rd, &wr, &sa, 0)) return p;
     if (out == Out::Pipe) SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-    if (out == Out::File)
-        wr = CreateFileW(W(file).c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == Out::File) {
+        wr = CreateFileW(W(file).c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (wr != INVALID_HANDLE_VALUE) SetFilePointerEx(wr, LARGE_INTEGER{}, nullptr, FILE_END);
+    }
     if (out == Out::Null) wr = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr);
     HANDLE in = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ, &sa, OPEN_EXISTING, 0, nullptr);
     STARTUPINFOW si{};
@@ -219,6 +221,21 @@ bool process_running(const char *name) {
         found = _wcsicmp(e.szExeFile, want.c_str()) == 0;
     CloseHandle(snap);
     return found;
+}
+void error_box(const char *title, const char *text) {
+    fprintf(stderr, "%s: %s\n", title, text);
+    MessageBoxW(nullptr, W(text).c_str(), W(title).c_str(), MB_OK | MB_ICONERROR);
+}
+int process_count(const char *name) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    std::wstring want = W(name) + L".exe";
+    PROCESSENTRY32W e{};
+    e.dwSize = sizeof e;
+    int n = 0;
+    for (BOOL more = Process32FirstW(snap, &e); more; more = Process32NextW(snap, &e)) n += _wcsicmp(e.szExeFile, want.c_str()) == 0;
+    CloseHandle(snap);
+    return n;
 }
 bool on_path(const char *tool) {
     wchar_t buf[MAX_PATH];

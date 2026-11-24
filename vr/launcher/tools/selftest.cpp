@@ -181,6 +181,26 @@ int main(int argc, char **argv) {
     printf("repo %s builder %d repo %d built %d\n", p.repo.c_str(), p.builder_ok, p.repo_ok, p.game_built);
     EXPECT(p.builder_ok && p.repo_ok && p.game_built);
 
+    printf("view\n");   // (the game's settings file: beside the game before its first start, then the user folder's)
+    EXPECT(sys::read_view(p) == -1 && sys::read_3d(p) == sys::k3dMono && sys::k3dModes == 2);   // (3D not set: Mono)
+    write(sys::join(p.game, "hookshot_options.ini"), "vr=1\r\nview=0\r\nwindow_view=1\r\n3d=1\r\n");
+    EXPECT(sys::read_view(p) == sys::kViewWindow && sys::read_3d(p) == sys::k3dMono);   // (a saved From depth: Mono)
+    EXPECT(sys::write_view(p, sys::kViewFirst) && sys::read_view(p) == sys::kViewFirst);
+    EXPECT(sys::read_file(sys::join(p.game, "hookshot_options.ini")) == "vr=1\nview=1\nwindow_view=0\n3d=1\n");
+    const std::string user_ini = sys::join(sys::join(dir, "data"), "hookshot/hookshot_options.ini");
+    write(user_ini, "3d=4\n");
+    EXPECT(sys::read_view(p) == -1 && sys::write_view(p, sys::kViewThird) && sys::read_view(p) == sys::kViewThird);
+    EXPECT(sys::read_file(user_ini) == "3d=4\nview=0\nwindow_view=0\n");
+    EXPECT(sys::read_3d(p) == sys::k3dStereo && sys::write_3d(p, sys::k3dMono) && sys::read_3d(p) == sys::k3dMono);
+    EXPECT(sys::write_3d(p, sys::k3dStereo) && sys::read_file(user_ini) == "3d=4\nview=0\nwindow_view=0\n");
+    EXPECT(sys::read_menu_button(p) == sys::kMenuY);   // (Menu button not set: Menu or Y; any other line kept)
+    EXPECT(sys::write_menu_button(p, sys::kMenuSticks) && sys::read_menu_button(p) == sys::kMenuSticks);
+    EXPECT(sys::read_file(user_ini) == "3d=4\nview=0\nwindow_view=0\nvr_menu_button=1\n");
+    EXPECT(sys::write_menu_button(p, sys::kMenuY) && sys::read_menu_button(p) == sys::kMenuY);
+    write(user_ini, "vr_menu_button=7\n");
+    EXPECT(sys::read_menu_button(p) == sys::kMenuSticks);   // (as the game holds it to its range)
+    unlink(user_ini.c_str()), unlink(sys::join(p.game, "hookshot_options.ini").c_str());
+
     printf("build\n");
     sys::BuildState s = run_build(p, fake, false);
     EXPECT(s.finished && s.ok && s.step == sys::Step::Shaders && s.folder == p.game);
@@ -252,7 +272,32 @@ int main(int argc, char **argv) {
     out = launch(p, c, false);
     EXPECT(has(out, "HOOKSHOT_VR=0") && !has(out, "HOOKSHOT_VR=1") && has(out, "HOOKSHOT_NO_UPDATE_CHECK=1"));
     EXPECT(out.find("HOS_FPS_TARGET=") == std::string::npos);
+    EXPECT(out.rfind(std::string("\nlauncher: HookshotVR ") + upd::kVersionName + ", VR off\n", 0) == 0);
     EXPECT(sys::exists(sys::join(c.logs, "last-run.1.log")));
+
+    printf("run logs\n");   // (the last six runs, the oldest dropped; each starts with what started it, without a path)
+    {
+        auto log = [&](int n) { return sys::join(c.logs, n ? "last-run." + std::to_string(n) + ".log" : "last-run.log"); };
+        for (int n = 0; n < 9; n++) sys::remove_tree(log(n));
+        for (int run = 1; run <= 8; run++) {
+            setenv("RUN", std::to_string(run).c_str(), 1);
+            EXPECT(has(launch(p, c, false), "RUN=" + std::to_string(run)));
+            for (int n = 0; n < 9; n++) {
+                const bool kept = n < sys::kRunsKept && run - n > 0;
+                EXPECT(sys::exists(log(n)) == kept && (!kept || has("\n" + sys::read_file(log(n)), "RUN=" + std::to_string(run - n))));
+            }
+        }
+        sys::remove_tree(log(3));   // (one the player took away: only those before it move up, the oldest stays)
+        setenv("RUN", "9", 1), launch(p, c, false), unsetenv("RUN");
+        for (int n = 0; n < sys::kRunsKept; n++)
+            EXPECT(has("\n" + sys::read_file(log(n)), "RUN=" + std::to_string(n < 4 ? 9 - n : 8 - n)));
+        EXPECT(sys::kRunsKept == 6 && !sys::exists(sys::join(c.logs, "last-run.moving.log")));
+        c.runtime = sys::kRuntimeCustom, c.runtime_json = custom;
+        EXPECT(launch(p, c, true).rfind(std::string("\nlauncher: HookshotVR ") + upd::kVersionName + ", VR on, VR Runtime custom: Some Runtime\n", 0) == 0);
+        c.runtime_json = sys::join(dir, "missing.json");
+        EXPECT(has(launch(p, c, true), std::string("launcher: HookshotVR ") + upd::kVersionName + ", VR on, VR Runtime custom: not found"));
+        c.runtime = sys::kRuntimeSystem;
+    }
 
     printf("start with\n");
     std::string mark = sys::join(dir, "started");
@@ -310,6 +355,13 @@ int main(int argc, char **argv) {
         uc.hookshot = R, uc.hookshotvr = sys::join(R, "HookshotVR"), uc.logs = sys::join(dir, "logs");
         sys::Paths up = sys::paths(uc);
         EXPECT(up.game_built && up.builder_ok && up.repo_ok && sys::game_stamp(up.game) == "stamp-A");
+        EXPECT(!upd::pending(up, nullptr));
+
+        printf("  a game without a stamp (v1.0.0's, this release unpacked over it): its rebuild offered\n");
+        remove(sys::join(R, "main-game/.hookshotvr_stamp").c_str());
+        upd::Release old;
+        EXPECT(sys::game_stamp(up.game).empty() && upd::pending(up, &old) && old.rebuild && !old.launcher && old.stamp == "stamp-A");
+        write(sys::join(R, "main-game/.hookshotvr_stamp"), "stamp-A\n");
         EXPECT(!upd::pending(up, nullptr));
 
         printf("  offline\n");

@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
 #include <cstdarg>
@@ -31,6 +32,8 @@
 #include "vk_menu.h"
 #include "vk_texture.h"
 #include "vk_paths.h"
+#include "switches.h"          // (the switches set, in the log: tester_log.inc)
+#include "upscaler_rows.h"
 // (rec::boundary only: this file's vkCmd* calls stay direct, not vk_work.h's. The headset thread records its own command buffers,
 // which the recorder never touches; the replay-side calls below (frame_capture.inc) let the recorder catch up first)
 #include "vk_recorder.h"
@@ -50,9 +53,11 @@ extern const unsigned char hookshot_font_heading[];    // (nx2/ui_fonts.py: Libe
 #include "openxr/openxr_platform.h"
 
 #include "shaders/vr_warp_comp_spv.h"
+#include "shaders/vr_warp_splat_comp_spv.h"
 #include "shaders/vr_depth_comp_spv.h"
 #include "shaders/vr_window_comp_spv.h"
 #include "shaders/vr_window_game_comp_spv.h"
+#include "shaders/vr_flat_eyes_comp_spv.h"
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -75,6 +80,8 @@ namespace {
 #include "../comfort/vignette_layer.inc"   // VR HOOK (the Comfort Aids' vignette round both eyes)
 #include "../menu/wrist_draw.inc"   // VR HOOK (the wrist check HUD on the left wrist)
 #include "window_view.inc"   // (the Window view: the game through a frame fixed in the room)
+#include "flat_eyes.inc"     // (a flat frame in each eye, at its own pose and FOV)
+#include "tester_log.inc"    // (what a player's log holds: the options, the runtime, the frames as sent)
 #include "frame_loop.inc"
 } // namespace (private headset helpers)
 

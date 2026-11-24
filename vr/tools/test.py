@@ -70,6 +70,7 @@ FILES = {
     'tp_aim_host': 'vr/items/aim/third_person_aim_host.c',   # third person: where the aimed shot lands (its reticle)
     'game_hooks': 'vr/vr_game_hooks.py',
     'vk_replay': 'gpu/vk/vk_replay.cpp',
+    'vk_draw': 'gpu/vk/vk_draw.cpp',
 }
 GENERATE = REPO / 'vr' / 'tools' / 'generate'   # makes data from the player's own game files
 GENERATED = None   # where that data is for this run: the build's (<work>/vr_generated), or made from --romfs
@@ -637,7 +638,9 @@ def check_menu_hold():
     #include <assert.h>
     #include <algorithm>
     #include <atomic>
-    enum { HOOKSHOT_VR_BTN_LOWER = 1, HOOKSHOT_VR_BTN_UPPER = 2, HOOKSHOT_VR_BTN_STICK = 4, HOOKSHOT_VR_BTN_MENU = 8 };
+    enum { HOOKSHOT_VR_BTN_LOWER = 1, HOOKSHOT_VR_BTN_UPPER = 2, HOOKSHOT_VR_BTN_STICK = 4, HOOKSHOT_VR_BTN_MENU = 8,
+           HOOKSHOT_VR_BTN_MENU2 = 64 };
+    struct { int vr_menu_button = 0; } opts;
     struct HandState { float trigger = 0, squeeze = 0; uint32_t buttons = 0; };
     struct { HandState shared[2]; } ctl;
     struct { bool holding = false; float grip_held[2]{}; std::atomic<bool> open{false}; } panel;
@@ -672,6 +675,373 @@ def check_menu_hold():
     assert 'vr::panel_mask(h, o[7], o[8], nullptr, nullptr);' in api                # (hookshot_vr_hands_world)
 
 
+def check_menu_y_hold():
+    """the VR menu's second way: the left upper button (Y; Index: B) held as long as Menu (one constant) opens the VR menu and
+    closes it from any of its levels (SteamVR keeps Touch's left Menu button for its dashboard). A shorter press is Back in the
+    menu, as it is let go, and nothing else elsewhere; the press that opened it is no Back and does not close it, the one that
+    closed it opens nothing; a hold that was something else's meanwhile (Menu, Hookshot's menu, an ocarina's notes) does nothing
+    until let go. With Menu button at Both sticks, both stick clicks held do all that instead of Y (one alone is nothing), and the
+    game never gets them. The game side's reading (vr_menu_y_step, panel_mask) and the menu's (vrm_y_tap) run together here"""
+    host, layer, menu = read('controllers_host'), read('vr_menu_api'), read('vr_menu')
+    start = host.index('#define kVrMenuHoldNs')
+    end = host.index('\n}\n', host.index('static int vr_menu_y_step(')) + 3
+    mask = layer[layer.index('void panel_mask('):layer.index('\n}\n', layer.index('void panel_mask(')) + 3]
+    tap = menu[menu.index('bool vrm_y_tap(bool y) {'):menu.index('\n}\n', menu.index('bool vrm_y_tap(bool y) {')) + 3]
+    compile_run(r"""
+    #include <stdint.h>
+    #include <assert.h>
+    #include <algorithm>
+    #include <atomic>
+    enum { HOOKSHOT_VR_BTN_UPPER = 2, HOOKSHOT_VR_BTN_STICK = 4, HOOKSHOT_VR_BTN_MENU = 8, HOOKSHOT_VR_BTN_GRIP = 32, HOOKSHOT_VR_BTN_MENU2 = 64 };
+    struct { int vr_menu_button = 0; } opts;
+    struct HandState { float trigger = 0, squeeze = 0; uint32_t buttons = 0; };
+    struct { HandState shared[2]; } ctl;
+    struct { bool holding = false; float grip_held[2]{}; std::atomic<bool> open{false}; } panel;
+    bool panel_open() { return panel.open.load(); }
+    void panel_set_open(bool open) { panel.open = open; if (open) panel.holding = true; }
+    struct { bool was_open = false, y_was = false, y_pressed = false; } vrm;
+    """ + host[start:end] + mask + tap + r"""
+    int64_t t;
+    int focus, backs, toggles;   /* (the menu's level, as vrm_back walks it: 2 the rows, 1 the sections, 0 the tabs) */
+    bool game_saw_y, game_saw_clicks, busy;
+    /* 11 ms: the game side's reading, then the menu's (offset: the other way round, which comes first is anybody's) */
+    void game_side() {
+        uint32_t b = ctl.shared[0].buttons;
+        float trigger = 0, squeeze = ctl.shared[0].squeeze, stick[2] = {};
+        panel_mask(0, trigger, squeeze, stick, &b);
+        game_saw_y = game_saw_y || (b & HOOKSHOT_VR_BTN_UPPER);
+        uint32_t r = ctl.shared[1].buttons;
+        panel_mask(1, trigger, squeeze, stick, &r);
+        const int y = (b & HOOKSHOT_VR_BTN_MENU2) && (opts.vr_menu_button != 1 || (r & HOOKSHOT_VR_BTN_MENU2));   /* (vr_pad_read's) */
+        game_saw_clicks = game_saw_clicks || ((b | r) & HOOKSHOT_VR_BTN_STICK);
+        if (vr_menu_y_step(y, busy, panel_open(), t)) panel_set_open(!panel_open()), toggles++;
+    }
+    void menu_side() {   /* (vrm_tick and vrm_input, the Y in them) */
+        if (panel_open() != vrm.was_open) vrm.was_open = panel_open(), vrm.y_was = true, vrm.y_pressed = false;
+        if (!panel_open()) return;
+        if (vrm_y_tap((ctl.shared[0].buttons & HOOKSHOT_VR_BTN_UPPER) != 0)) {
+            backs++;
+            if (focus > 0) focus--; else panel_set_open(false);
+        }
+    }
+    bool menu_first;
+    void hold(bool y, int ms) {
+        ctl.shared[0].buttons = (ctl.shared[0].buttons & ~(uint32_t)HOOKSHOT_VR_BTN_UPPER) | (y ? HOOKSHOT_VR_BTN_UPPER : 0);
+        for (int at = 0; at < ms; at += 11) {
+            if (menu_first) menu_side(), game_side(); else game_side(), menu_side();
+            t += 11000000LL;
+        }
+    }
+    void clear() { backs = toggles = 0; game_saw_y = game_saw_clicks = false; }
+    void sticks(bool l, bool r, int ms) {   /* (Menu button: Both sticks) */
+        ctl.shared[0].buttons = l ? HOOKSHOT_VR_BTN_STICK : 0, ctl.shared[1].buttons = r ? HOOKSHOT_VR_BTN_STICK : 0;
+        hold(false, ms);
+    }
+    int main() {
+        assert(kVrMenuHoldNs == 500000000LL);
+        for (int order = 0; order < 2; order++) {
+            menu_first = order;
+            focus = 2;
+            hold(false, 300), clear();
+            hold(true, 150), hold(false, 100);               /* a quick press: no menu, and the game has its Y */
+            assert(!panel_open() && !toggles && game_saw_y);
+            hold(true, 480), hold(false, 100);               /* just under the Menu button's time: nothing */
+            assert(!panel_open() && !toggles);
+            hold(true, 530);                                 /* held that long: it opens, while still held */
+            assert(panel_open() && toggles == 1);
+            hold(true, 5000), hold(false, 200);              /* held on and let go: the press is neither Back nor a close */
+            assert(panel_open() && toggles == 1 && backs == 0 && focus == 2);
+            clear();
+            hold(true, 100), hold(false, 100);               /* a tap: Back a level, never the game's */
+            assert(panel_open() && backs == 1 && focus == 1 && !game_saw_y);
+            for (int level = 2; level >= 0; level--) {       /* held in it: it closes from any level, with no Back on the way */
+                focus = level, clear();
+                hold(true, 530);
+                assert(!panel_open() && toggles == 1 && backs == 0 && focus == level);
+                hold(true, 5000), hold(false, 200);          /* held on, let go: not opened again, and the game sees no Y */
+                assert(!panel_open() && toggles == 1 && backs == 0 && !game_saw_y);
+                hold(true, 530), hold(false, 100);           /* the next hold opens it */
+                assert(panel_open() && toggles == 2 && backs == 0 && focus == level);
+            }
+            focus = 0, clear();
+            hold(true, 100), hold(false, 600);               /* a tap on the tabs: Back closes it, and it stays closed */
+            assert(!panel_open() && backs == 1 && !toggles && !game_saw_y);
+            ctl.shared[0].squeeze = 1, ctl.shared[0].buttons = HOOKSHOT_VR_BTN_GRIP;
+            hold(false, 100), clear();
+            hold(true, 530), hold(false, 100);               /* with a sword in the hand (its grip held): opens, */
+            assert(panel_open());
+            hold(true, 530), hold(false, 100);               /* closes, */
+            assert(!panel_open());
+            hold(true, 530), hold(false, 100);               /* and opens again, the grip never let go */
+            assert(panel_open() && toggles == 3);
+            hold(true, 530), ctl.shared[0] = HandState{}, hold(false, 100);
+            assert(!panel_open());
+            clear();
+            hold(true, 200), busy = true, hold(true, 100), busy = false, hold(true, 1000), hold(false, 100);   /* busy meanwhile */
+            assert(!panel_open() && !toggles);
+            busy = true, hold(true, 22), busy = false, hold(true, 1000), hold(false, 100);                     /* as it was pressed */
+            assert(!panel_open() && !toggles);
+            hold(true, 200), panel_set_open(true), hold(true, 1000);   /* (opened by something else during the hold: not closed) */
+            assert(panel_open() && !toggles);
+            hold(false, 100), hold(true, 200), panel_set_open(false), hold(true, 1000);   /* (closed so: not opened again) */
+            assert(!panel_open() && !toggles);
+            hold(false, 100);
+            opts.vr_menu_button = 1, focus = 2, clear();     /* Both sticks: */
+            hold(true, 2000), hold(false, 100);              /* Y's hold is nothing, and a tap still Back in the menu */
+            sticks(true, false, 2000), sticks(false, true, 2000), sticks(false, false, 100);   /* one stick alone: nothing */
+            assert(!panel_open() && !toggles);
+            sticks(true, false, 300), sticks(true, true, 480), sticks(false, false, 100);      /* half a second of both */
+            assert(!panel_open() && !toggles);
+            sticks(true, false, 300), sticks(true, true, 530);
+            assert(panel_open() && toggles == 1);
+            sticks(true, true, 3000), sticks(true, false, 300), sticks(false, false, 100);
+            assert(panel_open() && toggles == 1 && backs == 0);
+            hold(true, 100), hold(false, 100);
+            assert(backs == 1 && focus == 1);
+            clear(), sticks(true, true, 530);
+            assert(!panel_open() && toggles == 1 && backs == 0);
+            sticks(true, true, 3000), sticks(false, true, 300), sticks(false, false, 100);     /* (the game never sees those clicks) */
+            assert(!panel_open() && toggles == 1 && !game_saw_clicks);
+            opts.vr_menu_button = 0;
+            hold(false, 100);
+        }
+        return 0;
+    }
+    """, cpp=True)
+    # (Both sticks, where the clicks are the game's: one alone reaches it, late or as it is let go; both never)
+    start = host.index('#define kVrBothClicksNs')
+    compile_run(r"""
+    #include <stdint.h>
+    #include <assert.h>
+    """ + host[start:host.index('\n}\n', host.index('static int vr_both_clicks(')) + 3] + r"""
+    static VrClick c[2];
+    static int64_t t = 1000000000LL;
+    static int run(int ls, int rs, int ms) {   /* what the game saw of them */
+        int seen = 0;
+        for (int at = 0; at < ms; at += 11) seen |= vr_both_clicks(c, ls, rs, t), t += 11000000LL;
+        return seen;
+    }
+    int main(void) {
+        assert(run(0, 0, 100) == 0);
+        assert(run(1, 0, 60) == 0 && run(0, 0, 60) == 1 && run(0, 0, 200) == 1 && run(0, 0, 200) == 0);   /* a tap: as it is let go */
+        assert(run(0, 1, 100) == 0 && run(0, 1, 50) == 2 && run(0, 1, 2000) == 2);                       /* held: late, as long */
+        assert(run(0, 0, 11) == 0);
+        assert(run(1, 0, 90) == 0 && run(1, 1, 2000) == 0 && run(0, 1, 2000) == 0 && run(0, 0, 500) == 0);   /* both: never */
+        assert(run(0, 1, 50) == 0 && run(1, 1, 50) == 0 && run(0, 0, 500) == 0);                         /* a quick both: never */
+        assert(run(1, 0, 500) == 1 && run(1, 1, 500) == 0 && run(1, 0, 500) == 0 && run(0, 0, 100) == 0);   /* joined late */
+        assert(run(1, 0, 50) == 0 && run(0, 0, 30) == 1);
+        return 0;
+    }
+    """)
+    # (the wiring: one threshold for Menu and Y; MENU2 is the game side's own bit, past the menu's mask but not Window's Move
+    # mode's; busy while Menu is down with it, Hookshot's menu is up, or either ocarina's notes are played with the menu closed;
+    # hands lost end the hold; the game's Y, in third person, left as it was)
+    pad = host[host.index('static void vr_pad_read('):]
+    assert host.count('#define kVrMenuHoldNs') == 1 and 'kVrMenuYHoldNs' not in host
+    busy = ('const int y_busy = menu || hookshot_menu || (!vr_open && (ocarina_playing || hos_oc_wait == 1 || (sticks && '
+            'hos_vr_radial_open())));')
+    call = 'if (vr_menu_y_step(y, y_busy, vr_open, now)) {'
+    assert 'const int y = (lb & VR_BTN_MENU2) && (!sticks || (rb & VR_BTN_MENU2));' in pad
+    assert 'const int sticks = rx_option(1034, 0) == 1, both = sticks && ls && rs;' in pad
+    assert 'if (id == 1034) return opts.vr_menu_button;' in (REPO / 'gpu/vk/vk_replay.cpp').read_text(encoding='utf-8')
+    assert 'const int click = sticks ? vr_both_clicks(clicks, ls, rs, now) : ls | rs << 1;' in pad
+    assert '!both && ls && (!sticks || now - ls_at >= kVrBothClicksNs) &&' in pad and '!menu && !both && !ocarina_playing' in pad
+    assert '{TAB_STORED, "VR menu button", &opts.vr_menu_button, 0, 1, 1, tx_vr_menu_button,' in (REPO / 'vr/menu/vr_tab_rows.inc').read_text()
+    assert 'int vr_menu_button = 0;' in (REPO / 'vr/menu/vr_options.inc').read_text(encoding='utf-8')
+    for before in ('const int ocarina_hand = vr_ocarina(', 'const int hookshot_menu = rx_option(1, 0) != 0;',
+                   'const int hold = vr_menu_hold_step(&menu_hold, menu, chord, now);', 'const int vr_open = rx_vr_menu(0);', busy):
+        assert pad.index(before) < pad.index(call), before
+    assert 'vr_y_hold.was = 0;' in pad[:pad.index('const HookshotVrHand *l')]
+    assert 'if ((lb & VR_BTN_UPPER) && !stick_jump) *raw |= 1ULL << HOS_PAD_NORTH;   /* Y */' in pad
+    assert 'VR_BTN_MENU2 = 64' in host and 'HOOKSHOT_VR_BTN_MENU2 = 64,' in (REPO / 'vr/vk_vr.h').read_text()
+    api = (REPO / 'vr/headset/host_api.inc').read_text()
+    assert api.index('vr::panel_mask(h, o.trigger,') < api.index('vr::window_mask(h, o.trigger,')
+    window = (REPO / 'vr/headset/window_view.inc').read_text(encoding='utf-8')
+    assert 'if (buttons) *buttons &= HOOKSHOT_VR_BTN_MENU;' in window[window.index('void window_mask('):]
+    # (the menu's: B, the right hand's, is Back on its press; Y as it is let go; opened or closed, a Y still held is no press)
+    assert 'const bool back = (hands[1].buttons & HOOKSHOT_VR_BTN_UPPER) != 0;' in menu
+    assert 'const bool y_tap = vrm_y_tap((hands[0].buttons & HOOKSHOT_VR_BTN_UPPER) != 0);' in menu
+    assert 'if ((back && !vrm.back_was) || y_tap) vrm_back();' in menu
+    assert 'vrm.select_was = vrm.back_was = vrm.y_was = true, vrm.y_pressed = false;' in menu
+    # (every controller with a left upper button binds it: Touch's y, Index's b; the ones without (Vive wand, WMR, simple)
+    # keep the Menu hold alone; Y is never bound to Menu itself, whose tap is the game's Plus)
+    make = function_body(read('headset'), 'void make_controls() {')
+    tables = dict(re.findall(r'suggest\("(/interaction_profiles/[a-z0-9_/]+)", \w+, \{(.*?)\}\);', make, re.S))
+    left_upper = {p: re.findall(r'\{ctl\.upper, "/user/hand/left/input/([a-z0-9_/]+)"\}', b) for p, b in tables.items()}
+    assert left_upper['/interaction_profiles/valve/index_controller'] == ['b/click'], left_upper
+    assert {p for p, v in left_upper.items() if not v} == {'/interaction_profiles/htc/vive_controller',
+        '/interaction_profiles/microsoft/motion_controller', '/interaction_profiles/khr/simple_controller'}, left_upper
+    assert all(v in ([], ['y/click'], ['b/click']) for v in left_upper.values()), left_upper
+    for p, b in tables.items():
+        assert not re.search(r'\{ctl\.menu, "/user/hand/left/input/[yb]/click"\}', b), f'{p}: Y bound to Menu (a quick Y would be Plus)'
+
+
+def check_menu_f2():
+    """F2 on the keyboard opens and closes the VR menu: one press once, only with the window in front, VR running, no control
+    waiting for its key, no text field with the keyboard and no game control bound to F2; a press refused is not kept for
+    later; no controller is asked for; the window's keys reach it on both systems (the queue F12 is taken from)"""
+    menu = read('vr_menu')
+    start = menu.index('void vrm_key(bool in_front) {')
+    compile_run(r"""
+    #include <assert.h>
+    #include <stddef.h>
+    enum { VK_F2 = 0x71, HOS_KEY_N = 40, HOS_BIND_KEY = 1 };
+    struct Host { int (*take_key_press)(int); int (*binding)(int, int, int); };
+    static int queued, bound = -1, bound_slot, presses;
+    static int take(int key) { assert(key == VK_F2); const int q = queued; queued = 0; return q; }
+    static int binding(int what, int b, int slot) { assert(what == HOS_BIND_KEY); return b == bound && slot == bound_slot ? VK_F2 : 0x41; }
+    static Host the_host = {take, binding}, *host = &the_host;
+    static int listening;
+    static int field, *editing;
+    static void logf(const char*, ...) {}
+    namespace vr {
+    static bool on = true, open, hookshot_menu;
+    static bool active() { return on; }
+    static bool panel_open() { return open; }
+    static bool panel_toggle() { if (!open && hookshot_menu) return false; open = !open, presses++; return true; }
+    }
+    """ + menu[start:menu.index('\n}\n', start) + 3] + r"""
+    static void press(bool front = true) { queued = 1, vrm_key(front); }
+    int main() {
+        vrm_key(true); assert(!vr::open);
+        press(); assert(vr::open && presses == 1);
+        vrm_key(true), vrm_key(true); assert(vr::open && presses == 1);    /* held: the window queues it once */
+        press(); assert(!vr::open && presses == 2);
+        press(false); assert(presses == 2); vrm_key(true); assert(presses == 2);   /* another window in front: nothing, nor later */
+        listening = 2, press(), listening = 1, press(), listening = 0; assert(presses == 2);
+        editing = &field, press(), editing = nullptr; assert(presses == 2);
+        vr::on = false, press(), vr::on = true; assert(presses == 2);
+        for (bound_slot = 0; bound_slot < 2; bound_slot++)
+            for (bound = 0; bound < HOS_KEY_N; bound++) { press(); assert(presses == 2); }
+        bound = -1;
+        vr::hookshot_menu = true, press(), vr::hookshot_menu = false; assert(presses == 2 && !vr::open);
+        press(); assert(vr::open && presses == 3);
+        return 0;
+    }
+    """, cpp=True)
+    body = menu[start:menu.index('\n}\n', start)]
+    assert 'hands' not in body and 'ctl' not in body
+    tick = (REPO / 'gpu/vk/vk_menu.cpp').read_text(encoding='utf-8')
+    tick = tick[tick.index('void menu_tick() {'):]
+    assert tick.index('const bool mine = pid == GetCurrentProcessId();') < tick.index('    vrm_key(mine);') < tick.index('auto pad = [&]')
+    keys = (REPO / 'host/posix/display_sdl.c').read_text(encoding='utf-8')
+    assert 'if (v[i] && !was[i]) hos_vk_note_key_press((unsigned)i);' in keys
+    assert 'if (!(lp & (1 << 30))) hos_vk_note_key_press((unsigned)wp);' in (REPO / 'host/display.c').read_text(encoding='utf-8')
+
+
+def check_menu_hint():
+    """the VR menu's hint names the buttons as the runtime does for what is bound (its localized names, shortened; a name the
+    menu cannot show, ours), else ours for the profile: no Y where the controller has none, B on an Index; with no controller
+    the last names stay; asked again whenever the profile is (note_profiles). A runtime without the calls still starts"""
+    source, layer, menu = read('headset'), read('vr_menu_api'), read('vr_menu')
+    def function(text, head):
+        at = text.index(head)
+        return text[at:text.index('\n}\n', at) + 3]
+    code = ''.join(function(source, h) for h in ('std::string short_button_name(std::string n) {', 'void own_button_names(',
+                                                 'int bound_button(XrAction a, std::string& name) {', 'void name_menu_buttons() {'))
+    compile_run(r"""
+    #include <assert.h>
+    #include <algorithm>
+    #include <cctype>
+    #include <cstdint>
+    #include <cstring>
+    #include <map>
+    #include <mutex>
+    #include <string>
+    #include <vector>
+    typedef uint64_t XrPath, XrAction, XrSession, XrInstance; typedef int XrResult;
+    #define XR_SUCCEEDED(r) ((r) >= 0)
+    #define XR_FAILED(r) ((r) < 0)
+    enum { XR_MAX_PATH_LENGTH = 256, XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO, XR_TYPE_INPUT_SOURCE_LOCALIZED_NAME_GET_INFO,
+           XR_INPUT_SOURCE_LOCALIZED_NAME_COMPONENT_BIT = 4 };
+    struct XrBoundSourcesForActionEnumerateInfo { int type; const void* next; XrAction action; };
+    struct XrInputSourceLocalizedNameGetInfo { int type; const void* next; XrPath sourcePath; uint64_t whichComponents; };
+    static struct { XrSession session = 1; XrInstance inst = 1; std::mutex pose_mu; } s;
+    static struct { std::string profile[2]; std::string menu_name = "menu", upper_name = "Y"; bool pads = false; XrAction menu = 8, upper = 2; } ctl;
+    static void logf(const char*, ...) {}
+    struct Source { std::string path, name; };
+    static std::map<XrAction, std::vector<Source>> sources;   // (path ids: action * 10 + index)
+    static bool works = true;
+    static XrResult bound(XrSession, const XrBoundSourcesForActionEnumerateInfo* i, uint32_t cap, uint32_t* n, XrPath* out) {
+        if (!works) return -1;
+        auto& v = sources[i->action];
+        *n = (uint32_t)v.size();
+        if (cap && cap < v.size()) return -1;
+        for (uint32_t k = 0; k < cap; k++) out[k] = i->action * 10 + k;
+        return 0;
+    }
+    static XrResult copy(const std::string& t, uint32_t cap, uint32_t* n, char* out) {
+        *n = (uint32_t)t.size() + 1;
+        if (!cap) return 0;
+        if (cap < *n) return -1;
+        memcpy(out, t.c_str(), *n);
+        return 0;
+    }
+    static XrResult source_name(XrSession, const XrInputSourceLocalizedNameGetInfo* i, uint32_t cap, uint32_t* n, char* out) {
+        assert(i->whichComponents == XR_INPUT_SOURCE_LOCALIZED_NAME_COMPONENT_BIT);
+        return copy(sources[i->sourcePath / 10][i->sourcePath % 10].name, cap, n, out);
+    }
+    static XrResult xrPathToString(XrInstance, XrPath p, uint32_t cap, uint32_t* n, char* out) { return copy(sources[p / 10][p % 10].path, cap, n, out); }
+    static XrResult (*xr_bound_sources)(XrSession, const XrBoundSourcesForActionEnumerateInfo*, uint32_t, uint32_t*, XrPath*) = bound;
+    static XrResult (*xr_source_name)(XrSession, const XrInputSourceLocalizedNameGetInfo*, uint32_t, uint32_t*, char*) = source_name;
+    """ + code + function(layer, 'std::string menu_hint_words(') + r"""
+    static std::string hint(int sticks = 0) { return menu_hint_words(ctl.menu_name, ctl.upper_name, sticks, ctl.pads, false); }
+    static std::string value(int sticks = 0) { return menu_hint_words(ctl.menu_name, ctl.upper_name, sticks, ctl.pads, true); }
+    static void use(const char* profile) { ctl.profile[0] = profile, name_menu_buttons(); }
+    #define P "/interaction_profiles/"
+    #define L "/user/hand/left/input/"
+    #define R "/user/hand/right/input/"
+    int main() {
+        assert(short_button_name("Y Button") == "Y" && short_button_name("Menu Button") == "menu" && short_button_name("Left Menu") == "menu");
+        assert(short_button_name("B") == "B" && short_button_name("Trackpad") == "trackpad" && short_button_name("") == "");
+        assert(short_button_name("Bouton Y\xC3\xA9") == "" && short_button_name("A very long button name") == "");
+        assert(short_button_name("Button") == "button" && short_button_name("left") == "left");
+        assert(hint() == "Hold left menu or Y" && value() == "Menu or Y");                 /* no controller seen yet */
+        sources[8] = {{L "menu/click", "Menu Button"}}, sources[2] = {{R "b/click", "B Button"}, {L "y/click", "Y Button"}};
+        use(P "oculus/touch_controller"); assert(hint() == "Hold left menu or Y");         /* (the left one of the two) */
+        assert(hint(1) == "Hold left menu or both sticks" && value(1) == "Both sticks");
+        sources[8] = {{L "trackpad/force", "Trackpad"}}, sources[2] = {{L "b/click", "B"}, {R "b/click", "B"}};
+        use(P "valve/index_controller"); assert(hint() == "Hold left trackpad or left B" && value() == "Menu or B");
+        use("(none)"); assert(hint() == "Hold left trackpad or left B");                   /* asleep: the last ones stay */
+        sources[8] = {{L "menu/click", "Menu"}}, sources[2] = {};
+        use(P "htc/vive_controller"); assert(hint() == "Hold left menu" && value() == "Menu" && hint(1) == "Hold left menu or both pads");
+        sources[2] = {{R "menu/click", "Menu"}};                                           /* (WMR's right Menu is B) */
+        use(P "microsoft/motion_controller"); assert(hint() == "Hold left menu" && hint(1) == "Hold left menu or both sticks");
+        sources[2] = {{L "x/click", "X Button"}};                                          /* rebound by the player */
+        use(P "oculus/touch_controller"); assert(hint() == "Hold left menu or left X");
+        sources[2] = {{L "y/click", "\xE3\x83\xA1"}};                                      /* a name the menu's font lacks: ours */
+        use(P "oculus/touch_controller"); assert(hint() == "Hold left menu or Y");
+        sources[8] = {}, sources[2] = {{L "y/click", "Y"}};                                /* Menu unbound (SteamVR's) */
+        use(P "oculus/touch_controller"); assert(hint() == "Hold Y");
+        for (int way = 0; way < 3; way++) {                                                /* ours: lists nothing, fails, has no calls */
+            sources.clear(), works = way != 1;
+            if (way == 2) xr_bound_sources = nullptr, xr_source_name = nullptr;
+            use(P "valve/index_controller"); assert(hint() == "Hold left trackpad or left B");
+            use(P "htc/vive_controller"); assert(hint() == "Hold left menu");
+            use(P "khr/simple_controller"); assert(hint() == "Hold left menu" && !ctl.pads);
+            use(P "microsoft/motion_controller"); assert(hint() == "Hold left menu");
+            use(P "hp/mixed_reality_controller"); assert(hint() == "Hold left menu or Y");
+        }
+        assert(menu_hint_words("", "", false, false, false) == "F2");
+        return 0;
+    }
+    """, cpp=True)
+    assert function(source, 'void note_profiles() {').rstrip().endswith('name_menu_buttons();\n}')
+    loader = (REPO / 'vr/headset/runtime_loader.inc').read_text(encoding='utf-8')
+    wanted = loader[loader.index('#define XRX(X)'):loader.index('#define XRX_PTR')]
+    assert 'xrEnumerateBoundSourcesForAction' not in wanted and 'xrGetInputSourceLocalizedName' not in wanted, 'optional calls'
+    assert 'xr_bound_sources = nullptr, xr_source_name = nullptr;' in loader
+    # (our own names, and the tables they are of: a profile has a left upper name only when its table binds one)
+    make = function_body(source, 'void make_controls() {')
+    none = {p for p, b in re.findall(r'suggest\("(/interaction_profiles/[a-z0-9_/]+)", \w+, \{(.*?)\}\);', make, re.S)
+            if '{ctl.upper, "/user/hand/left/' not in b}
+    own = function(source, 'void own_button_names(')
+    assert none == set(re.findall(r'"(/interaction_profiles/[a-z0-9_/]+)"', own)) - {'/interaction_profiles/valve/index_controller'}, none
+    # (shown: the Menu row's words and the Menu button row's value, drawn again when they change)
+    assert 'const std::string words = vrm_info_words(r);' in menu and 'for (const char c : vr::menu_hint(false)) mix(c);' in menu
+    assert 'if (r.value == &opts.vr_menu_button) return vr::menu_hint(true);' in menu
+
+
 def check_menu_rows():
     """the VR menu's rows: every VR setting is in exactly one place, the VR menu (Hookshot's own menu has no VR tab and none of
     the mod's rows; VR on or off is decided at the start, Replay threads is upstream's switch again), saved under its old key; nothing Planned; the built-in switches are
@@ -701,7 +1071,7 @@ def check_menu_rows():
     controls = menu[menu.index('const VrmRow vrm_controls[] = {'):]
     controls = controls[:controls.index('};')]
     info = re.findall(r'VRM_INFO\("([^"]+)", "([^"]+)"\)', controls)
-    assert info == [('Menu', 'Hold left menu'), ('Items wheel', 'Left stick click'), ('Gear wheel', 'Right stick click'),
+    assert info == [('Menu', 'Hold left menu or Y'), ('Items wheel', 'Left stick click'), ('Gear wheel', 'Right stick click'),
                     ('Walk', 'Left stick'), ('Turn', 'Right stick'), ('Jump', 'Right stick up'), ('Wrist HUD', 'Wrist up'),
                     ('Draw sword', 'Grip over shoulder'), ('Slash', 'Swing'), ('Spin', 'Trigger'), ('Lock on', 'Shield trigger'),
                     ('Hold item', 'Grip'), ('Use item', 'Trigger'), ('Throw', 'Release while moving'), ('Bow', 'Pull string')], info
@@ -730,11 +1100,11 @@ def check_menu_rows():
             'Menu position', 'Turn style', 'Snap angle',
             'Turn speed', 'Move direction', 'Move vignette',
             'Turn vignette', 'Air vignette', 'Carry vignette', 'Arm length', 'Body alignment', 'Crawl eye height', 'Calibrate wrists', 'Item wheel opens',
-            'Sword angle', 'Swing arc', 'Swing speed', 'Hit buzz', 'Shield when guarding', 'Bow size', 'String grab with',
+            'Menu button', 'Sword angle', 'Swing arc', 'Swing speed', 'Hit buzz', 'Shield when guarding', 'Bow size', 'String grab with',
             'Aim reticle', 'Aim reticle size', 'Elemental arrow effects', 'Grip', 'Throw strength', 'Bomb size', 'Distance grab',
             'Distance grab reach', 'Distance grab aim', 'Aim with', 'Song effects', 'Cutscene view', '3D cutscenes',
             'Cutscene light', 'Screen size', 'Re-align after events', 'Event culling',
-            'Item Get view', 'Item shown', 'Eye resolution', 'Depth quality', '3D strength', 'Detail distance',
+            'Item Get view', 'Item shown', 'Eye resolution', 'Depth quality', '3D strength', 'Near depth', 'Detail distance',
             'Foliage distance', 'GPU profile', 'Show hands']
     assert names == want, f'the rows differ from the spec: {names}'
     assert 'VRM_SECTION("Body & Hands", vrm_body, "@hand"), VRM_SECTION("Controls", vrm_controls, "@controller")' in menu   # (Controller mapping's place)
@@ -743,9 +1113,14 @@ def check_menu_rows():
     section_icons = re.findall(r'VRM_SECTION\("[^"]+", \w+, "([^"]+)"\)', menu)
     assert len(section_icons) == len(re.findall(r'VRM_SECTION\(', menu)) - 1, 'a section without an icon'
     drawn = set(re.findall(r'k == "(\w+)"', menu[menu.index('bool vrm_icon_shapes('):menu.index('bool vrm_has_icon(')]))
-    for icon in section_icons + re.findall(r'\{"[^"]+", "[^"]+", \d+, "([^"]+)"\}', menu):
+    for icon in section_icons + re.findall(r'\{"[^"]+", "[^"]+", \w+, "(@\w+)"\}', menu):
         assert (icon[1:] in drawn) if icon.startswith('@') else f'"{icon}"' in icons_py, f'icon {icon} is neither drawn nor generated'
     assert 'int vr_menu_position = 0;' in defaults and '"VR menu position", &opts.vr_menu_position, 0, 1, 1,' in tab_rows
+    # (View: first person by default since v1.0.2; still saved as view= (the row's name, no key of its own in ini_key), 0 third
+    # person and 1 first, so a saved View is kept)
+    assert 'int vr_mode = 1;' in defaults and '{TAB_STORED, "View", &opts.vr_mode, 0, 1, 1, tx_vr_mode,' in tab_rows
+    assert '&opts.vr_mode' not in vk_menu_text[vk_menu_text.index('const char* ini_key('):vk_menu_text.index('static char k[48];')]
+    assert 'const char* tx_vr_mode(int v) { return v ? "First person" : "Third person"; }' in (REPO / 'vr/menu/vr_values_menu.inc').read_text(encoding='utf-8')
     # (the release: Show hands off, and the Debug tab, the last, shown only with HOOKSHOT_VR_DEBUG=1)
     assert 'int vr_show_hands = 0;' in defaults, 'Show hands draws squares at the hands for every player: off by default'
     assert '{"Debug", vrm_debug, VRM_N(vrm_debug)}};' in menu and 'env_on("HOOKSHOT_VR_DEBUG") ? kVrmTabs : kVrmTabs - 1' in menu
@@ -775,7 +1150,9 @@ def check_menu_rows():
     #include <string>
     struct Options { int """ + ', '.join(f + ' = 0' for f in used) + r"""; } opts;
     const char* tx(int) { return "row text"; }
+    constexpr int kVr3dMono = 0, kVr3dFromDepth = 1, kVr3dStereo = 4;   // (vr_values_menu.inc's)
     struct Row { int* value; int lo, hi, step; const char* (*text)(int); const char* help; };
+    namespace vr { static std::string menu_hint(bool value) { return value ? "Menu or Y" : "Hold left menu or Y"; } }
     Row rows[] = {""" + ', '.join('{&opts.%s, 0, 3, 1, tx, ""}' % f for f in used) + r"""};
     """ + menu[start:end] + menu[menu.index('constexpr float kVrmW'):menu.index('enum VrmHitKind')] + r"""
     const VrmRow& find(const char* name) {
@@ -789,9 +1166,12 @@ def check_menu_rows():
     int main() {
         opts.vr_mode = 1, opts.vr_stereo = 1, opts.vr_bow_preview = 1, opts.vr_bomb_pull = 1;
         int shown[16];
-        assert(vrm_shown(vrm_graphics[0], shown) == 3);           // (From depth: Depth quality shown)
+        assert(vrm_shown(vrm_graphics[0], shown) == 4);           // (From depth, kept for later: Depth quality and Near depth too)
+        opts.vr_stereo = 0;
+        assert(vrm_shown(vrm_graphics[0], shown) == 1 && vrm_hidden(find("3D strength")));   // (Mono: Eye resolution only)
         opts.vr_stereo = 4;
-        assert(vrm_shown(vrm_graphics[0], shown) == 2 && vrm_hidden(find("Depth quality")));   // (True stereo: hidden)
+        assert(!vrm_hidden(find("3D strength")));
+        assert(vrm_shown(vrm_graphics[0], shown) == 2 && vrm_hidden(find("Depth quality")) && vrm_hidden(find("Near depth")));   // (Stereo: hidden)
         assert(vrm_shown(vrm_items[2], shown) == 5);              // (the Bow, its reticle on: all five)
         opts.vr_bow_preview = 0;
         assert(vrm_hidden(find("Aim reticle size")) && !vrm_hidden(find("Aim reticle")));
@@ -807,6 +1187,8 @@ def check_menu_rows():
         assert(!strcmp(vrm_greyed(find("Sword angle")), "First person only") && vrm_greyed(find("Move direction")));
         assert(!vrm_greyed(find("HUD size")) && !vrm_greyed(find("Eye resolution")) && !vrm_greyed(find("View")));
         opts.vr_bomb_throw_mode = 1, opts.vr_boomerang_throw = 2, opts.vr_realign = 1;
+        assert(vrm_value_text(find("Menu button")) == "Menu or Y" && vrm_info_words(find("Menu")) == "Hold left menu or Y" &&
+               vrm_info_words(find("Jump")) == "Right stick up");   // (the first by the controller's own names)
         assert(vrm_value_text(find("Grip")) == "Press to toggle" && vrm_value_text(find("Aim with")) == "Headset");
         assert(vrm_value_text(find("Re-align after events")) == "Quick turn" && vrm_value_text(find("Snap angle")) == "row text");
         assert(find("View").cards[0].value == 1 && find("View").cards[1].value == 0);              // (First person, Third person)
@@ -822,7 +1204,8 @@ def check_menu_rows():
         assert(!strcmp(vrm_greyed(find("Place window")), "Window view only") && vrm_greyed(find("Size")));
         opts.vr_mode = 0, opts.vr_window = 0;
         assert(vrm_card_of(find("View")) == 1 && vrm_greyed(find("Move")));
-        assert(find("3D").cards[0].value == 1 && find("3D").cards[1].value == 4);                  // (From depth, True stereo)
+        assert(find("3D").cards[0].value == 0 && find("3D").cards[1].value == 4);   // (Mono, Stereo)
+        assert(!strcmp(find("3D").cards[0].label, "Mono") && !strcmp(find("3D").cards[1].label, "Stereo"));
         // (a long section scrolls, headset 20 Nov: the Debug tab's eleven rows ran off the panel)
         const float room = kVrmRowsBottom - kVrmRowsY;
         float rows11[11];
@@ -1754,6 +2137,8 @@ def check_radial():
     static int64_t hos_now_ns(void) { return clock_ns; }
     static void hos_log(const char *f, ...) { (void)f; }
     static float sx, sy, rsx, rsy;   // (the controllers' sticks, and their clicks: button 4)
+    static int both_sticks;          // (Menu button: Both sticks)
+    static int rx_option(int id, int otherwise) { return id == 1034 ? both_sticks : otherwise; }
     static uint32_t click, rclick;
     static int rx_vr_hands(void *out) {
         uint32_t *w = (uint32_t *)out;
@@ -1806,6 +2191,16 @@ def check_radial():
         frame(LS, 0, 0); frame(0, 0, 0); assert(hos_vr_radial_open() == 1);   // (the next opening takes the new list)
         frame(0, .9f, 0); frame(0, 0, 0); assert(oot_vr_radial_pending == 31);   // (right, of two: slot 1, item 31)
         oot_vr_radial_pending = -1;
+        // Menu button at Both sticks: both clicked, however briefly, opens no wheel (by default each is its own click)
+        oot_vr_radial_publish(items, 4, gear, 3);
+        both_sticks = 1;
+        for (int last = 0; last < 2; last++) {
+            frame(LS, 0, 0); frame(LS | RS, 0, 0); frame(LS | RS, 0, 0); frame(last ? LS : RS, 0, 0); frame(0, 0, 0); frame(0, 0, 0);
+            assert(!hos_vr_radial_open());
+        }
+        frame(LS, 0, 0); frame(0, 0, 0); assert(hos_vr_radial_open() == 1);   // (one alone still does)
+        frame(LS, 0, 0); frame(0, 0, 0); assert(!hos_vr_radial_open());
+        both_sticks = 0;
         oot_vr_radial_publish(items, 0, gear, 3);
         frame(LS, 0, 0); frame(0, 0, 0); assert(!hos_vr_radial_open());   // nothing to show: not opened
         assert(!oot_vr_radial_lock_word);                                // (and the lock left free)
@@ -7182,9 +7577,10 @@ def check_event_views():
     # (the world screen: a flat frame's picture on a quad in the room's space, placed once where it opened)
     eyes = read('eye_rendering')
     loop = read('frame_loop')
-    opened = eyes.index('if (!flat_was) {')
+    opened = eyes.index('if (!flat_screen.open || again) {')
     assert eyes.index('flat_pose.position = head.position;') > opened
-    assert eyes.index('flat_pose.position = head.position;') < eyes.index('flat_was = flat;')
+    assert eyes.index('flat_pose.position = head.position;') < eyes.index('flat_screen.open = true;')
+    assert 'if (flat) flat_place(head);\n    else flat_screen.open = false;' in eyes
     assert 'quad.space = s.local;' in eyes[eyes.index('bool flat_screen_quad('):]
     # (and its picture copied as drawn: no stereo shift for a flat frame, whose rim moved with the head, headset 22 Nov)
     assert 'const bool stereo = !sl.head_locked && opts.vr_stereo != 0 && sl.has_depth;' in eyes
@@ -7193,11 +7589,10 @@ def check_event_views():
     assert 'const uint32_t fh = sl.head_locked ? flat_picture_h(f.w, f.h) : 0;' in eyes   # (by the headset's own density)
     assert 'rec_w = v[0].recommendedImageRectWidth;' in eyes
     assert 'if (!fits && !make_eye(e, f.w, f.h)) return false;' in eyes
-    # (by default a flat frame is the eyes' projection layer at the screen's fixed heading: the quad showed a line along its
-    # edges, the user's A/B 22 Nov; the quad only by RX_VR_FLAT_LAYER=quad)
-    assert 'const bool quad = e && !strcmp(e, "quad");' in loop and 'return !quad;' in loop   # (no new swapchain for a smaller flat picture)
+    # (by default a flat frame is drawn into each eye's own view; the quad, which showed a line along its edges, the user's A/B
+    # 22 Nov, only by RX_VR_FLAT_LAYER=quad: check_flat_eyes)
     assert 'quad.subImage.imageRect.offset = {in, in};' in quad and 'quad.subImage.imageRect.extent = {w - 2 * in, h - 2 * in};' in quad
-    assert loop.index('if (!flat_as_projection && flat_screen_quad(flat_quad))') < loop.index('layer.views = views;')
+    assert loop.index('if (flat_mode() == kFlatQuad && flat_screen_quad(flat_quad))') < loop.index('layer.views = views;')
     defaults = (REPO / 'vr/menu/vr_options.inc').read_text(encoding='utf-8')
     assert 'int vr_events = 2;' in defaults and 'int vr_cinematic_view = 0;' in defaults and 'int vr_cutscene_screen = 70;' in defaults
 
@@ -7994,6 +8389,401 @@ def check_stereo_capture():
                        input=fixture+limit+'\nvoid capture(Texture* tex){\n'+route+'\n}\n'+checks,
                        text=True,check=True)
         subprocess.run([exe],check=True)
+
+
+def check_scene_depth_any_share():
+    """the scene's depth and true stereo's second eye are copied at every Render resolution: 67%/58%/50%/33% networks by shape"""
+    draw = read('vk_draw')
+    hook = re.search(r'if \(\(vr::active\(\) \|\| vr::eyes_wanted\(\)\) && (\w+)\(s, p\)\) \{[^\n]*\n\s*end_pass\(cmd\);\n'
+                     r'\s*vr::scene_done\(cmd\);', draw)
+    assert hook, 'the dispatch hook that runs vr::scene_done is gone'
+    assert hook.group(1) == 'vr_scene_network', f'scene_done runs on {hook.group(1)}, not on vr_scene_network'
+    known = re.search(r'bool gameplay_network\(uint64_t key\) \{[^\n]+\}', draw).group()
+    body = 'static bool vr_scene_network(const NvnState& s, const Program& p) ' + function_body(draw, 'static bool vr_scene_network(')
+    assert 'scene_color_is' in read('vr_h') and 'bool scene_color_is(const Texture* color) {' in read('headset')
+    compile_run(r'''
+    #include <cassert>
+    #include <atomic>
+    #include <cstdint>
+    #include <vector>
+    enum VkImageViewType { VK_IMAGE_VIEW_TYPE_2D };
+    enum VkFormat { VK_FORMAT_UNDEFINED };
+    enum class ViewUse { Sample, Storage };
+    struct Texture { unsigned width = 1280, height = 720; };
+    struct Descriptor { int count = 1; };
+    struct Info { bool uses_cooperative_matrix = true; std::vector<Descriptor> texture_descriptors{1}, image_descriptors{1}; };
+    struct Stage { Info info; };
+    struct Program { uint64_t key = 0x6676619641320ba7ull; std::vector<Stage> stages{1}; };
+    struct NvnState {};
+    Texture scene, other;
+    unsigned bound_handle = 1;
+    uint32_t handle_of(const NvnState&, const Stage&, const Descriptor&, int) { return bound_handle; }
+    int texture_view_of(uint32_t h, VkImageViewType, ViewUse, VkFormat, Texture** t) { *t = h == 1 ? &scene : &other; return 1; }
+    namespace vr { bool scene_color_is(const Texture* t) { return t == &scene; } }
+    void logf(const char*, ...) {}
+    ''' + known + '\n' + body + r'''
+    int main() {
+        NvnState s;
+        Program p;
+        assert(vr_scene_network(s, p));                          // (67%: its own network, the scene's colour in)
+        p.key = 0x72ba090c70fe2614ull; assert(vr_scene_network(s, p));   // (50%)
+        bound_handle = 2; assert(!vr_scene_network(s, p));        // (a network of that shape on another texture)
+        p.key = 0x9dc98871eb7fc101ull; assert(vr_scene_network(s, p));   // (100%: the full-size pass, by its key)
+        p.key = 0xfd029a317a9a4b94ull; assert(vr_scene_network(s, p));   // (75%)
+        p.key = 1; bound_handle = 1; p.stages[0].info.uses_cooperative_matrix = false; assert(!vr_scene_network(s, p));
+        p.stages[0].info.uses_cooperative_matrix = true; p.stages[0].info.texture_descriptors.resize(2); assert(!vr_scene_network(s, p));
+        p.stages.clear(); assert(!vr_scene_network(s, p));
+    }
+    ''', cpp=True)
+
+
+def check_warp_near_plane():
+    """From depth's warp clamps distances to the picture's real near plane (0.1 m in play), not its far plane (24672 m)"""
+    eyes = read('eye_rendering')
+    planes = re.search(r'        const float a = f\.projection_ok.*?\n        const float far_plane = [^\n]+\n', eyes, re.S)
+    assert planes, 'make_eyes: the depth planes (a, b, near_plane, far_plane) are gone'
+    assert 'p.near_plane = std::max(kWarpNearOf(opts.vr_near_depth), near_plane' in eyes, 'the warp\'s near distance: the camera\'s, eased no nearer than Near depth\'s'
+    compile_run(r'''
+    #include <cassert>
+    #include <cmath>
+    struct { bool projection_ok = true; } f;
+    struct { float proj[16]; } sl;
+    static void planes_of(float n, float fa, float* near_out, float* far_out) {
+        for (float& v : sl.proj) v = 0;
+        sl.proj[10] = -(fa + n) / (fa - n), sl.proj[11] = -2 * fa * n / (fa - n), sl.proj[14] = -1;   // (the game's, in float)
+    ''' + planes.group() + r'''
+        *near_out = near_plane, *far_out = far_plane;
+        (void)b;
+    }
+    int main() {
+        float n, fa;
+        planes_of(0.1f, 25000.0f, &n, &fa); assert(std::fabs(n - 0.1f) < 1e-4f && fa > 20000.0f);   // (gameplay)
+        planes_of(0.5f, 1000.0f, &n, &fa); assert(std::fabs(n - 0.5f) < 1e-4f && std::fabs(fa - 1000.0f) < 1.0f);   // (a cutscene)
+        f.projection_ok = false; planes_of(0.1f, 25000.0f, &n, &fa); assert(n == 0.05f);
+    }
+    ''', cpp=True)
+
+
+def check_warp_splat():
+    """From depth warps in two passes: each source lands once (the nearest kept), holes filled from behind; headers rebuilt"""
+    shaders = REPO / 'vr/headset/shaders'
+    splat, warp = (shaders / 'vr_warp_splat.comp').read_text(), (shaders / 'vr_warp.comp').read_text()
+    assert 'imageAtomicMax(landed' in splat, 'pass 1: the nearest source per pixel (the largest shift)'
+    assert 'imageLoad(landed, p)' in warp and 'landed_along(p, walk' in warp, 'pass 2: the landed source, or the background'
+    assert 'float tmax' not in warp, 'the fixed-step march is back (its steps matched the wrong surface: ghost copies)'
+    eyes = read('eye_rendering')
+    order = [eyes.index(k) for k in ('vkCmdClearColorImage(cmd, s.landed[e].image', 'VK_PIPELINE_BIND_POINT_COMPUTE, s.warp_splat)',
+                                     'memory_barrier(cmd);\n        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.warp)')]
+    assert order == sorted(order), 'clear, splat, barrier, resolve'
+    if not shutil.which('glslangValidator'):
+        skip('glslangValidator not found (the SPIR-V headers not compared)')
+    with tempfile.TemporaryDirectory(prefix='hookshot-vr-warp-') as directory:
+        for name, var in (('vr_warp', 'VR_WARP_COMP_SPV'), ('vr_warp_splat', 'VR_WARP_SPLAT_COMP_SPV')):
+            out = Path(directory) / f'{name}.h'   # (the command that makes the header)
+            subprocess.run(['glslangValidator', '-V', '--target-env', 'vulkan1.3', '--vn', var, str(shaders / f'{name}.comp'),
+                            '-o', str(out)], check=True, capture_output=True)
+            words = lambda text: re.findall(r'0x[0-9a-f]{8}', text)
+            assert words(out.read_text()) == words((shaders / f'{name}_comp_spv.h').read_text()), f'{name}_comp_spv.h is stale'
+
+
+def check_3d_modes():
+    """3D is Mono (the default) or Stereo: a card sets its own mode, a saved From depth loads as Mono; one switch offers it again"""
+    values = (REPO / 'vr/menu/vr_values_menu.inc').read_text(encoding='utf-8')
+    code = values[values.index('constexpr int kVr3dMono'):values.index('const char* tx_vr_near_depth')]
+    options = (REPO / 'vr/menu/vr_options.inc').read_text(encoding='utf-8')
+    menu = (REPO / 'gpu/vk/vk_menu.cpp').read_text(encoding='utf-8')
+    switch = 'static constexpr bool vr_from_depth = false;'
+    assert options.count(switch) == 1 and 'int vr_stereo = 0;' in options
+    hook = re.search(r'    if \(r\.value == &opts\.vr_stereo\) (v = [^\n;]+;)', function_body(menu, 'void set_row(Row& r, int v, int dir'))
+    load = re.search(r'if \(r\.value == &opts\.vr_stereo\) (\*r\.value = [^\n;]+;)', menu)
+    assert hook and load and 'r.lo), r.hi);' in menu[load.start() - 200:load.start()], 'set_row and the ini reader take the modes offered'
+    vrm = path('vr_menu').read_text(encoding='utf-8')
+    card = vrm[vrm.index('    {"3D", &opts.vr_stereo, VrmKind::cards'):]
+    card = card[:card.index('VrmCard{}}},') + len('VrmCard{}}},')]
+    assert 'if (*r.value != v) set_row(*row, v, v > *r.value ? 1 : -1);' in vrm, 'vrm_set: a card gives its value and a direction'
+    assert '#include "../../menu/vr_options.inc"' in (REPO / 'vr/launcher/src/system.h').read_text(encoding='utf-8'), 'the launcher: the same switch'
+    for on in (False, True):
+        compile_run(r'''
+        #include <cassert>
+        #include <cstring>
+        struct Options {
+        ''' + (options.replace(switch, switch.replace('false', 'true')) if on else options) + r'''
+        } opts;
+        struct Row { int* value; } r{&opts.vr_stereo};
+        ''' + code + r'''
+        enum class VrmKind { cards };
+        struct VrmCard { const char* label; const char* desc; int value; const char* icon; };
+        struct VrmRow { const char* name; int* value; VrmKind kind; unsigned when; const char* a; const char* b; VrmCard cards[3]; };
+        const VrmRow row[] = {''' + card + r'''};
+        static int set(int from, int v, int dir) { opts.vr_stereo = from; (void)dir; ''' + hook.group(1) + r''' return v; }
+        static int loaded(int saved) { opts.vr_stereo = saved; ''' + load.group(1) + r''' return opts.vr_stereo; }
+        int main() {
+            assert(Options().vr_stereo == 0 && loaded(0) == 0 && loaded(4) == 4);
+            const bool on = Options::vr_from_depth;
+            assert(loaded(1) == (on ? 1 : 0));
+            const int n = row[0].cards[2].label ? 3 : 2;
+            assert(n == (on ? 3 : 2));
+            for (int c = 0; c < n; c++) {
+                assert(!strcmp(row[0].cards[c].label, tx_vr_stereo(row[0].cards[c].value)));
+                // (from every mode, the card's own: v1.0.2's first three cards stepped instead, and Flat to True stereo gave From depth)
+                for (int f = 0; f < n; f++) {
+                    const int from = row[0].cards[f].value, v = row[0].cards[c].value;
+                    if (from != v) assert(set(from, v, v > from ? 1 : -1) == v);
+                }
+            }
+            assert(!strcmp(tx_vr_stereo(0), "Mono") && !strcmp(tx_vr_stereo(4), "Stereo"));
+        }
+        ''', cpp=True)
+    eyes = read('eye_rendering')
+    loop = eyes[eyes.index('const bool flat_copy = opts.vr_stereo == 0'):]
+    assert loop.index('continue;') < loop.index('vkCmdDispatch('), 'Mono: the picture copied, the warp skipped'
+    present = function_body(read('headset'), 'void present(VkCommandBuffer cmd, VkImage src,')
+    slot = present[present.index('make_image(sl.color,'):][:300]
+    assert 'VK_IMAGE_USAGE_TRANSFER_SRC_BIT' in slot, 'the slot\'s picture copied from in Mono: TRANSFER_SRC'
+
+
+def check_flat_eyes():
+    """flat frames (v1.0.2): each eye its located pose and FOV, the room-fixed screen where that eye sees it; a release switch"""
+    switches = (REPO / 'gpu/vk/switches.def').read_text()
+    row = switches.index('SW(RX_VR_FLAT_LAYER, kill,')
+    assert switches.rindex('#endif', 0, row) > switches.rindex('#ifdef HOOKSHOT_VR_RESEARCH', 0, row), 'a release switch'
+    eyes, loop = read('eye_rendering'), read('frame_loop')
+    flat = (REPO / 'vr/headset/flat_eyes.inc').read_text(encoding='utf-8')
+    assert 'const char* e = getenv("RX_VR_FLAT_LAYER");' in eyes
+    mode = eyes[eyes.index('enum FlatMode'):eyes.index('const char* flat_mode_name() {')]
+    assert 'vli.space = s.local;\n            XrViewState rs' in loop, 'the eyes located in the room, at the display time'
+    views = flat[flat.index('int flat_eyes_views('):]
+    assert 'flat_eyes.fov[e] = located[e].fov;' in views and 'v.pose = flat_eyes.pose[e];' in views and 'v.fov = flat_eyes.fov[e];' in views
+    assert 'const FlatEyePush push = flat_eye_push(' in flat, 'the push constants kept by value (a pointer into the temporary drew black)'
+    push = eyes[eyes.index('struct FlatEyePush'):eyes.index('// ---- a gameplay frame both eyes share')]
+    math = (REPO / 'vr/headset/poses.inc').read_text(encoding='utf-8')
+    quats = math[math.index('XrQuaternionf q'):math.index('\n', math.index('XrQuaternionf qinv('))]
+    compile_run(r"""
+    #include <cassert>
+    #include <cmath>
+    #include <cstdio>
+    #include <cstdlib>
+    #include <cstring>
+    struct XrVector3f { float x, y, z; };
+    struct XrQuaternionf { float x, y, z, w; };
+    struct XrPosef { XrQuaternionf orientation; XrVector3f position; };
+    struct XrFovf { float angleLeft, angleRight, angleUp, angleDown; };
+    #define logf(...) (void)0
+    """ + mode + quats + push + r"""
+    static float rad(float deg) { return deg / 57.2958f; }
+    int main(int, char**) {
+        setenv("RX_VR_FLAT_LAYER", "projection", 1);
+        assert(flat_mode() == kFlatProjection);
+        const float yaw = rad(30), hx = 2.45f, hy = 1.38f;
+        const XrPosef screen{{0, std::sin(yaw / 2), 0, std::cos(yaw / 2)}, {0.4f, 1.5f, -3.2f}};
+        for (int e = 0; e < 2; e++) {   // (asymmetric FOVs, 63 mm apart, each turned 5 degrees outward, the head rolled and moved)
+            const float cant = rad(e ? -5 : 5), roll = rad(12);
+            const XrQuaternionf eq = qmul(XrQuaternionf{0, 0, std::sin(roll / 2), std::cos(roll / 2)}, XrQuaternionf{0, std::sin(cant / 2), 0, std::cos(cant / 2)});
+            const XrPosef eye{eq, {e ? 0.13f : 0.067f, 1.7f, 0.2f}};
+            const XrFovf fov = e ? XrFovf{rad(-42), rad(52), rad(46), rad(-50)} : XrFovf{rad(-52), rad(42), rad(46), rad(-50)};
+            const FlatEyePush p = flat_eye_push(screen, 2 * hx, 2 * hy, eye, fov, 2000, 2200, 2);
+            const float* v = p.v;
+            assert(v[11] == 2000 && v[15] == 2200 && v[20] == hx && v[21] == hy);
+            for (int c = 0; c < 5; c++) {   // (the corners and the middle: where the eye sees each in the room, the shader finds it)
+                const float at[3] = {c == 4 ? 0.0f : c & 1 ? hx : -hx, c == 4 ? 0.0f : c & 2 ? hy : -hy, 0};
+                float w[3], dir[3];
+                qrot(screen.orientation, at, w);
+                const float d[3] = {w[0] + screen.position.x - eye.position.x, w[1] + screen.position.y - eye.position.y, w[2] + screen.position.z - eye.position.z};
+                qrot(qinv(eye.orientation), d, dir);   // (in the eye's view)
+                const float tx = dir[0] / -dir[2], ty = dir[1] / -dir[2];
+                // (vr_flat_eyes.comp hit: the view's tangents at that pixel, the ray in the screen's axes)
+                const float px = (tx - v[4]) / (v[5] - v[4]) * v[11], py = (ty - v[7]) / (v[6] - v[7]) * v[15];
+                const float mx = v[4] + (v[5] - v[4]) * px / v[11], my = v[7] + (v[6] - v[7]) * py / v[15];
+                float r[3];
+                for (int i = 0; i < 3; i++) r[i] = v[8 + i] * mx + v[12 + i] * my - v[16 + i];
+                const float k = v[2] / -r[2];
+                assert(std::fabs(v[0] + r[0] * k - at[0]) < 2e-4f && std::fabs(v[1] + r[1] * k - at[1]) < 2e-4f);
+            }
+        }
+    }
+    """, cpp=True)
+    shaders = REPO / 'vr/headset/shaders'
+    comp = (shaders / 'vr_flat_eyes.comp').read_text()
+    assert 'vec3 d = pc.c0.xyz * mix(pc.tangent.x, pc.tangent.y, t.x) + pc.c1.xyz * mix(pc.tangent.w, pc.tangent.z, t.y) - pc.c2.xyz;' in comp
+    if not shutil.which('glslangValidator'):
+        skip('glslangValidator not found (the SPIR-V header not compared)')
+    with tempfile.TemporaryDirectory(prefix='hookshot-vr-flat-') as directory:
+        out = Path(directory) / 'flat.h'
+        subprocess.run(['glslangValidator', '-V', '--target-env', 'vulkan1.3', '--vn', 'VR_FLAT_EYES_COMP_SPV', str(shaders / 'vr_flat_eyes.comp'),
+                        '-o', str(out)], check=True, capture_output=True)
+        words = lambda text: re.findall(r'0x[0-9a-f]{8}', text)
+        assert words(out.read_text()) == words((shaders / 'vr_flat_eyes_comp_spv.h').read_text()), 'vr_flat_eyes_comp_spv.h is stale'
+
+
+def check_mono_pose():
+    """a gameplay frame both eyes share one picture of (Mono, no depth): each view at its own eye, the picture at infinity"""
+    switches = (REPO / 'gpu/vk/switches.def').read_text()
+    row = switches.index('SW(RX_VR_MONO_POSE, kill,')
+    assert switches.rindex('#endif', 0, row) > switches.rindex('#ifdef HOOKSHOT_VR_RESEARCH', 0, row), 'a release switch'
+    eyes, loop = read('eye_rendering'), read('frame_loop')
+    assert 'f.own = !sl.head_locked && !stereo && eye_pose_ok && mono_pose_eyes();' in eyes, "Stereo's views stay as they are"
+    assert 'if (f.own) pose = shared_eye_pose(f.drawn, eye_pose[e], f.turned);' in eyes, 'from the pose the picture was drawn at'
+    assert '? "Mono" : opts.vr_stereo == 4 ?' in loop and '"no (Mono)"' in eyes and '"Flat" : opts.vr_stereo' not in loop
+    # (parallel eyes: never the resampling pass, so the picture goes as before)
+    assert 'f.turned = f.own && f.projection_ok && eye_turned(eye_pose[e].orientation);' in eyes
+    math = (REPO / 'vr/headset/poses.inc').read_text(encoding='utf-8')
+    quats = math[math.index('XrQuaternionf q'):math.index('\n', math.index('XrQuaternionf qinv('))]
+    push = eyes[eyes.index('struct FlatEyePush'):eyes.index('// ---- a gameplay frame both eyes share')]
+    code = eyes[eyes.index('/// Whether an eye is turned from the head'):eyes.index('/// Each eye from its slot')]
+    compile_run(r"""
+    #include <algorithm>
+    #include <cassert>
+    #include <cmath>
+    #include <cstdint>
+    struct XrVector3f { float x, y, z; };
+    struct XrQuaternionf { float x, y, z, w; };
+    struct XrPosef { XrQuaternionf orientation; XrVector3f position; };
+    struct XrFovf { float angleLeft, angleRight, angleUp, angleDown; };
+    struct XrOffset2Di { int32_t x, y; };
+    struct XrExtent2Di { int32_t width, height; };
+    struct XrRect2Di { XrOffset2Di offset; XrExtent2Di extent; };
+    """ + quats + push + code + r"""
+    static float rad(float deg) { return deg / 57.2958f; }
+    int main() {
+        assert(!eye_turned({0, 0, 0, 1}) && !eye_turned({0, 0.0004f, 0, 1}) && eye_turned({0, std::sin(rad(0.5f)), 0, std::cos(rad(0.5f))}));
+        const XrPosef drawn{{0, std::sin(rad(20)), 0, std::cos(rad(20))}, {1, 2, 3}};
+        const XrPosef eye{{0, std::sin(rad(2.5f)), 0, std::cos(rad(2.5f))}, {-0.032f, 0.01f, -0.005f}};
+        const XrPosef p = shared_eye_pose(drawn, eye, false), q = shared_eye_pose(drawn, eye, true);
+        assert(p.orientation.y == drawn.orientation.y && p.orientation.w == drawn.orientation.w);   // (the turn the picture has)
+        float off[3] = {p.position.x - 1, p.position.y - 2, p.position.z - 3}, back[3];
+        qrot(qinv(drawn.orientation), off, back);
+        assert(std::fabs(back[0] + 0.032f) < 1e-6f && std::fabs(back[1] - 0.01f) < 1e-6f && std::fabs(back[2] + 0.005f) < 1e-6f);
+        assert(std::fabs(q.orientation.y - std::sin(rad(22.5f))) < 1e-5f && q.position.x == p.position.x);
+        // a direction in the head's frame: its picture pixel, and where the turned eye's view of the picture shows it
+        const XrFovf own{rad(-52), rad(42), rad(46), rad(-50)};
+        const float p00 = 0.76f, p11 = 0.8f;
+        XrFovf fov;
+        XrRect2Di r;
+        const FlatEyePush e = turned_eye_view(eye, own, false, 1.03f, p00, p11, 2880, 2304, &fov, &r);
+        assert(std::fabs(std::tan(fov.angleLeft) - 1.03f * std::tan(rad(-52))) < 1e-4f && r.extent.width <= 2880 && r.extent.height <= 2304);
+        for (float x = -0.8f; x < 0.9f; x += 0.4f)
+            for (float y = -0.8f; y < 0.9f; y += 0.4f) {
+                const float dir[3] = {x, y, -1};
+                float d[3];
+                qrot(qinv(eye.orientation), dir, d);
+                const float tx = d[0] / -d[2], ty = d[1] / -d[2];   // (in the eye: its pixel by the submitted fov and rect)
+                const float px = (tx - std::tan(fov.angleLeft)) / (std::tan(fov.angleRight) - std::tan(fov.angleLeft)) * r.extent.width;
+                const float py = (std::tan(fov.angleUp) - ty) / (std::tan(fov.angleUp) - std::tan(fov.angleDown)) * r.extent.height;
+                const float* v = e.v;
+                const float mx = v[4] + (v[5] - v[4]) * px / v[11], my = v[7] + (v[6] - v[7]) * py / v[15];   // (vr_flat_eyes.comp)
+                float ray[3];
+                for (int i = 0; i < 3; i++) ray[i] = v[8 + i] * mx + v[12 + i] * my - v[16 + i];
+                const float k = v[2] / -ray[2];
+                const float u = 0.5f + 0.5f * (v[0] + ray[0] * k) / v[20], w = 0.5f - 0.5f * (v[1] + ray[1] * k) / v[21];
+                assert(std::fabs(u - (0.5f + 0.5f * x * p00)) < 1e-4f && std::fabs(w - (0.5f - 0.5f * y * p11)) < 1e-4f);
+            }
+        assert(e.v[22] == 1);
+    }
+    """, cpp=True)
+
+
+def check_tester_log():
+    """the log a player's picture is settled from (v1.0.2): the options at the start and each change, in every build, bounded"""
+    log = (REPO / 'vr/headset/tester_log.inc').read_text(encoding='utf-8')
+    assert 'vr_research_getenv' not in log and 'HOOKSHOT_VR_RESEARCH' not in log, 'in players\' builds'
+    loop, session = read('frame_loop'), (REPO / 'vr/headset/runtime_session.inc').read_text(encoding='utf-8')
+    assert loop.index('const XrResult ended = xrEndFrame(') < loop.index('tester_frame(layers, n_layers, named,')
+    assert loop.index('&blank_quad}}') > loop.index('{"the VR menu", &panel_quad}'), 'the blank layer is the last named'
+    assert session.index('xrCreateSwapchain = tester_swapchain;') < session.index('make_controls();')
+    assert 'tester_extensions(ci);' in session and 'tester_session_report(formats);' in session
+    assert 'logf("vr: [%.1f s] VR menu %s", run_s(), open ? "opened" : "closed");' in (REPO / 'vr/menu/vr_menu_api.inc').read_text()
+    code = log[log.index('struct TesterOption {'):log.index("// ---- the runtime's offer")]
+    fields = sorted(set(re.findall(r'opts\.(\w+)', code)))
+    rows = (REPO / 'gpu/vk/upscaler_rows.h').read_text(encoding='utf-8')
+    compile_run(r"""
+    #include <cassert>
+    #include <cstdarg>
+    #include <cstdint>
+    #include <cstdio>
+    #include <cstdlib>
+    #include <cstring>
+    #include <string>
+    #include <vector>
+    static struct { int """ + ', '.join(f + ' = 0' for f in fields) + r"""; } opts;
+    constexpr int kAutoPreset = 6;
+    namespace upscaler_rows { constexpr int kUpscalers = 9; constexpr int kPercent[] = {0, 100, 75, 67}; inline int percent(int v) { return v > 0 && v < 4 ? kPercent[v] : 0; } }
+    namespace switches { struct Row { const char* name; }; static const Row rows[] = {{"RX_VK_OTHER"}, {"RX_VR_FLAT_LAYER"}, {"RX_VR_MONO_POSE"}}; }
+    static std::vector<std::string> said;
+    static void logf(const char* f, ...) { char b[1024]; va_list a; va_start(a, f); vsnprintf(b, sizeof b, f, a); va_end(a); said.push_back(b); }
+    static double run_s() { return 12.34; }
+    static const char* flat_mode_name() { return "eyes"; }
+    static bool mono_pose_eyes() { return true; }
+    static bool layer_fov_located() { return true; }
+    static bool has(const char* t) { for (auto& l : said) if (l.find(t) != std::string::npos) return true; return false; }
+    """ + code + r"""
+    int main() {
+        setenv("RX_VR_FLAT_LAYER", "quad", 1), setenv("RX_VK_OTHER", "1", 1);
+        opts.vr_mode = 1, opts.resolution = 3, opts.preset = 6;
+        assert(!tester_options_frame() && has("View First person (1)") && has("3D Mono (0)") && has("Render resolution 67% (3)") && has("Auto (this PC) (6)"));
+        assert(has("switch set: RX_VR_FLAT_LAYER=quad") && !has("RX_VK_OTHER") && !has("RX_VR_MONO_POSE"));
+        for (auto& l : said) assert(l.size() < 900);
+        said.clear();
+        assert(!tester_options_frame() && said.empty());
+        opts.vr_mode = 0, opts.vr_window = 1, opts.vr_stereo = 4;
+        assert(tester_options_frame() && said.size() == 2 && has("[12.3 s] option View: First person (1) -> Window (2)") && has("3D: Mono (0) -> Stereo (4)"));
+        for (int i = 0; i < 1000; i++) opts.vr_stereo ^= 4, tester_options_frame();
+        assert(said.size() <= 300);
+    }
+    """, cpp=True)
+    assert 'kUpscalers = 9' in rows
+
+
+def check_layer_eye_fov():
+    """each eye's layer view is its own located FOV (+3%), cut from the symmetric picture: the rect matches the angles"""
+    eyes = read('eye_rendering')
+    head = 'bool located_eye_cut(const XrFovf& eye, float guard, float p00, float p11, uint32_t w, uint32_t h, XrFovf* fov, XrRect2Di* rect)'
+    assert head in eyes, 'located_eye_cut: its parameters changed'
+    cut = head + ' ' + function_body(eyes, head)
+    assert 'located_eye_cut(own, kCameraGuardBand, f.proj_x, f.proj_y, f.w, f.h, &cut, &rect)' in eyes
+    assert 'RX_VR_LAYER_FOV' in (REPO / 'gpu/vk/switches.def').read_text()
+    compile_run(r'''
+    #include <algorithm>
+    #include <cassert>
+    #include <cmath>
+    #include <cstdint>
+    struct XrFovf { float angleLeft, angleRight, angleUp, angleDown; };
+    struct XrOffset2Di { int32_t x, y; };
+    struct XrExtent2Di { int32_t width, height; };
+    struct XrRect2Di { XrOffset2Di offset; XrExtent2Di extent; };
+    ''' + cut + r'''
+    static float rad(float deg) { return deg / 57.2958f; }
+    int main() {
+        // (a Rift-like pair: each eye wider toward its own side; the picture encloses both, widened 3%, as the game's camera)
+        const XrFovf left{rad(-52), rad(42), rad(46), rad(-50)}, right{rad(-42), rad(52), rad(46), rad(-50)};
+        const float tx = std::tan(rad(52)) * 1.03f, ty = std::tan(rad(50)) * 1.03f, p00 = 1 / tx, p11 = 1 / ty;
+        const uint32_t w = 1920, h = 1080;
+        XrFovf f[2];
+        XrRect2Di r[2];
+        assert(located_eye_cut(left, 1.03f, p00, p11, w, h, &f[0], &r[0]) && located_eye_cut(right, 1.03f, p00, p11, w, h, &f[1], &r[1]));
+        assert(r[0].offset.x == 0 && r[0].offset.x + r[0].extent.width < (int32_t)w);   // (the left eye: from the left edge)
+        assert(r[1].offset.x > 0 && r[1].offset.x + r[1].extent.width == (int32_t)w);   // (the right: to the right edge)
+        assert(r[0].extent.width == r[1].extent.width && r[0].offset.y == r[1].offset.y);   // (mirror images)
+        assert(r[0].offset.y > 0 && r[0].offset.y + r[0].extent.height == (int32_t)h);   // (up 46 deg of the picture's 50)
+        for (int e = 0; e < 2; e++) {
+            const XrFovf& own = e ? right : left;
+            // (each angle the eye's own widened by about 3%, to the whole pixel)
+            assert(std::fabs(std::tan(-f[e].angleLeft) - std::min(std::tan(-own.angleLeft) * 1.03f, tx)) < 2.5f * tx / w);
+            assert(std::fabs(std::tan(f[e].angleRight) - std::min(std::tan(own.angleRight) * 1.03f, tx)) < 2.5f * tx / w);
+            assert(std::fabs(std::tan(f[e].angleUp) - std::tan(own.angleUp) * 1.03f) < 2.5f * ty / h);
+            // (and the rect's pixels are those angles: x = (t p00 + 1) / 2 w)
+            assert(std::fabs((std::tan(f[e].angleLeft) * p00 + 1) * 0.5f * w - r[e].offset.x) < 0.01f);
+            assert(std::fabs((std::tan(f[e].angleRight) * p00 + 1) * 0.5f * w - (r[e].offset.x + r[e].extent.width)) < 0.01f);
+            assert(std::fabs((1 - std::tan(f[e].angleUp) * p11) * 0.5f * h - r[e].offset.y) < 0.01f);
+        }
+        // (a symmetric eye the size of the picture: the whole picture)
+        const XrFovf whole{-std::atan(tx), std::atan(tx), std::atan(ty), -std::atan(ty)};
+        assert(located_eye_cut(whole, 1.0f, p00, p11, w, h, &f[0], &r[0]));
+        assert(r[0].offset.x == 0 && r[0].offset.y == 0 && r[0].extent.width == (int32_t)w && r[0].extent.height == (int32_t)h);
+        // (nothing usable: the picture's whole FOV stays)
+        assert(!located_eye_cut(left, 1.03f, 0, p11, w, h, &f[0], &r[0]));
+        assert(!located_eye_cut(XrFovf{0, 0, 0, 0}, 1.03f, p00, p11, w, h, &f[0], &r[0]));
+    }
+    ''', cpp=True)
 
 
 # ==========================================================================================================================
@@ -8796,6 +9586,9 @@ CHECKS = [
     ('menu', check_menu_setting_keys),
     ('menu', check_menu_rows),
     ('input', check_menu_hold),
+    ('input', check_menu_y_hold),
+    ('input', check_menu_f2),
+    ('input', check_menu_hint),
     ('input', check_controller_tables),
     ('camera', check_cull_margin),
     ('camera', check_world_cull),
@@ -8874,6 +9667,14 @@ CHECKS = [
     ('stereo', check_stereo_forget_module),
     ('stereo', check_stereo_camera_per_eye),
     ('stereo', check_stereo_capture),
+    ('stereo', check_scene_depth_any_share),
+    ('stereo', check_warp_near_plane),
+    ('stereo', check_warp_splat),
+    ('stereo', check_3d_modes),
+    ('headset', check_layer_eye_fov),
+    ('headset', check_flat_eyes),
+    ('headset', check_mono_pose),
+    ('headset', check_tester_log),
     ('headset', check_rebar_hint),
     ('build', check_generate_inputs),
     ('build', check_game_hooks_emitted),

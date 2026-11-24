@@ -538,6 +538,7 @@ uint64_t memory_late_fix_pending();
 void memory_late_fix_apply(uint64_t done);
 void memory_late_fix_wait_range(uint64_t guest, uint64_t n);   // (before a CPU upload reads guest memory: a pending late page's value)
 uint64_t vk_timeline_signal_sent();
+uint64_t vk_timeline_done();   // (the replay's timeline as the GPU finished it: no flush, no fix applied)
 void vk_timeline_wait_sent(uint64_t v);   // (a wait for a value already sent: no flush, safe under any lock)
 bool late_fix_wait_unlocked();   // (vk_replay.cpp: a pending late fix's value waited for before the queue's lock; false: a poll)
 void late_fix_wake(uint64_t v);

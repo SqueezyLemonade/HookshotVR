@@ -4,7 +4,7 @@
    A piece of host/nn_hid.c, included there at its VR HOOK (it uses that file's helpers). Not compiled on its own. */
 /* ---- (OoT VR) Quest/OpenXR controllers as an ordinary remappable gamepad ----------------------------------------- */
 enum {
-    VR_BTN_LOWER = 1, VR_BTN_UPPER = 2, VR_BTN_STICK = 4, VR_BTN_MENU = 8,
+    VR_BTN_LOWER = 1, VR_BTN_UPPER = 2, VR_BTN_STICK = 4, VR_BTN_MENU = 8, VR_BTN_MENU2 = 64,
 };
 typedef struct {
     int valid;
@@ -405,11 +405,45 @@ static int vr_menu_hold_step(VrMenuHold *m, int down, int chord, int64_t now) {
     m->was = down;
     return out;
 }
+/* (the VR menu's second way: the left upper button, Y (Index: B), held as long as Menu. Under SteamVR the left Menu button of
+   Touch-style controllers is its dashboard's, so the Menu hold never reaches the game; no runtime takes Y. With the
+   Menu button row at Both sticks, it is both stick clicks together instead.) One reading of it (VR_BTN_MENU2: also while the
+   VR menu is open), whether it is something else's now (busy), whether the VR menu is open: 1
+   open or close it now, else 0. The menu must be as it was when Y was pressed: one press never both opens and closes it, nor
+   undoes what closed it meanwhile. A hold busy at any time does nothing until Y is let go; a shorter press does nothing here
+   (in the menu it is Back as it is let go, vr/menu/vr_menu.inc vrm_y_tap; else the game's, as before) */
+static VrMenuHold vr_y_hold;
+static int vr_menu_y_step(int y, int busy, int open, int64_t now) {
+    static int open_was;
+    if (y && !vr_y_hold.was) open_was = open;
+    return vr_menu_hold_step(&vr_y_hold, y, busy, now) == 1 && open == open_was;
+}
+
+/* (Menu button: Both sticks, where a stick click is the game's: third person, menus, text, cutscenes) The two clicks (bit 0 the
+   left, bit 1 the right), as the game gets them: one alone reaches it kVrBothClicksNs late, or as it is let go if sooner (held
+   then kVrClickPressNs, so the game sees it), and both together never do, until each is let go: they are the menu's */
+#define kVrBothClicksNs 120000000LL
+#define kVrClickPressNs 100000000LL
+typedef struct { int was, joined; int64_t since, until; } VrClick;
+static int vr_both_clicks(VrClick c[2], int ls, int rs, int64_t now) {
+    const int down[2] = {ls, rs};
+    int out = 0;
+    for (int h = 0; h < 2; h++) {
+        if (down[h] && !c[h].was) c[h].since = now, c[h].joined = 0;
+        if (ls && rs) c[h].joined = 1, c[h].until = 0;
+        if (!down[h] && c[h].was && !c[h].joined && now - c[h].since < kVrBothClicksNs) c[h].until = now + kVrClickPressNs;
+        if ((down[h] && !c[h].joined && now - c[h].since >= kVrBothClicksNs) || now < c[h].until) out |= 1 << h;
+        c[h].was = down[h];
+    }
+    return out;
+}
 
 /* Quest layout:
    - face buttons, sticks, triggers and grips are the corresponding gamepad controls;
    - tap the left Menu button for Plus; hold it half a second for the VR menu; Menu+LS is Minus; Menu+RS opens Hookshot's
      Insert menu; Menu+X marks a place for the dev map editor (vr/devmap/devmap_host.c);
+   - hold Y (the left upper button; Menu button, Both sticks: both stick clicks) half a second for the VR menu too
+     (vr_menu_y_step);
    - in Hookshot's menu, the left stick is the D-pad; in the game, hold LS and move the right stick for D-pad directions.
    Menu is emitted on release so a chord never leaks a Plus press into the game. While the VR menu is open, the controllers
    are its own: the hands come here let go (vr/menu/vr_menu_layer.inc panel_mask), so Link stands still. */
@@ -418,6 +452,7 @@ static void vr_pad_read(uint64_t *raw, int32_t stick[4], int zone) {
     HookshotVrHands v;
     if (!rx_vr_hands(&v)) {
         vr_ocarina_hands_lost();   /* (vr/items/ocarina/ocarina_host.c: its buttons let go meanwhile) */
+        vr_y_hold.was = 0;         /* (a Y let go and pressed again meanwhile is not one long hold) */
         return;
     }
     const HookshotVrHand *l = &v.hand[0], *r = &v.hand[1];
@@ -500,10 +535,15 @@ static void vr_pad_read(uint64_t *raw, int32_t stick[4], int zone) {
         else *raw |= 1ULL << (a[1] < 0 ? HOS_PAD_DOWN : HOS_PAD_UP);
         a[0] = a[1] = 0;   /* the menu consumes the left stick as discrete navigation */
     }
-    const int dpad = !hookshot_menu && !menu && !ocarina_playing && ls && (abs(a[2]) > 18000 || abs(a[3]) > 18000);
+    const int sticks = rx_option(1034, 0) == 1, both = sticks && ls && rs;   /* (Menu button: Both sticks, both clicked) */
+    static int64_t ls_at;   /* (with it, the D-pad chord waits as long as a click does: the other stick may join) */
+    if (!ls) ls_at = 0;
+    else if (!ls_at) ls_at = now;
+    const int dpad = !hookshot_menu && !menu && !ocarina_playing && !both && ls && (!sticks || now - ls_at >= kVrBothClicksNs) &&
+                     (abs(a[2]) > 18000 || abs(a[3]) > 18000);
     /* (hos_vr_radial_open, vr/menu/radial_host.c: 2, the equipment menu: the right stick picks, no jump) */
     const int jump = vr_stick_jump(r->stick[0], r->stick[1], now);
-    if (jump && stick_jump && !dpad && !menu && !ocarina_playing && hos_vr_radial_open() != 2) *raw |= 1ULL << HOS_PAD_NORTH;
+    if (jump && stick_jump && !dpad && !menu && !both && !ocarina_playing && hos_vr_radial_open() != 2) *raw |= 1ULL << HOS_PAD_NORTH;
     if (ocarina_playing) a[2] = a[3] = 0;   /* (the right stick plays notes: the view does not turn) */
     if (dpad) {
         /* (with the VR ocarina, its D-pad Left is not the chord's: the ocarina starts at the mouth, never by a stick held
@@ -521,8 +561,10 @@ static void vr_pad_read(uint64_t *raw, int32_t stick[4], int zone) {
            controllers themselves, vr/menu/radial_host.c; the game never gets them: through a layout the left one opened the
            game's own menu) */
         const int radial = rx_option(901, 0) == 1 && hos_oot_vr_first_person();
-        if (ls && !radial) *raw |= 1ULL << HOS_PAD_LSTICK;
-        if (rs && !radial) *raw |= 1ULL << HOS_PAD_RSTICK;
+        static VrClick clicks[2];
+        const int click = sticks ? vr_both_clicks(clicks, ls, rs, now) : ls | rs << 1;
+        if ((click & 1) && !radial) *raw |= 1ULL << HOS_PAD_LSTICK;
+        if ((click & 2) && !radial) *raw |= 1ULL << HOS_PAD_RSTICK;
     }
 
     int chord = 0;
@@ -549,6 +591,15 @@ static void vr_pad_read(uint64_t *raw, int32_t stick[4], int zone) {
         plus_until = now + 120000000LL;                        /* a clean Plus tap (not while the VR menu is open) */
     }
     if (!menu && now < plus_until) *raw |= 1ULL << HOS_PAD_START;
+    /* (busy: Menu down with it, Hookshot's menu, the notes of either ocarina: the VR one's half step, the game's own) */
+    const int vr_open = rx_vr_menu(0);
+    const int y_busy = menu || hookshot_menu || (!vr_open && (ocarina_playing || hos_oc_wait == 1 || (sticks && hos_vr_radial_open())));
+    const int y = (lb & VR_BTN_MENU2) && (!sticks || (rb & VR_BTN_MENU2));   /* (and an open wheel's clicks are its own) */
+    if (vr_menu_y_step(y, y_busy, vr_open, now)) {
+        const int open = rx_vr_menu(1);
+        hos_log("vr: %s held %d ms: the VR menu %s", sticks ? "both sticks" : "Y", (int)(kVrMenuHoldNs / 1000000),
+                open ? "opens" : vr_open ? "closes" : "stays closed");
+    }
 
     int32_t q[4];
     hos_filter_stick(a[0], a[1], zone, q);       /* (OoT VR: 2.2's paired dead zone, as its pads) */

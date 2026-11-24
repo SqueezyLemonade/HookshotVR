@@ -17,8 +17,8 @@ namespace fs = std::filesystem;
 
 namespace upd {
 
-const char *const kVersion = "v1.0.1";
-const char *const kVersionName = "Alpha v1.0.1";
+const char *const kVersion = "v1.0.2";
+const char *const kVersionName = "Alpha v1.0.2";
 // The public release repository: its releases (and the source at each tag). Never a URL or a header with a token in it
 static const char *const kRepo = "SqueezyLemonade/HookshotVR";
 static constexpr double kGameGB = 60;       // (a rebuild: a second game folder beside the one played, while it builds)
@@ -447,7 +447,8 @@ void forget_check() {
 
 bool pending(const sys::Paths &p, Release *r) {
     std::string src = sys::source_stamp(p.repo), game = sys::game_stamp(p.game);
-    if (!p.game_built || !p.builder_ok || src.empty() || game.empty() || src == game) return false;
+    // (no stamp on the game: one v1.0.0 built, kept by a download unpacked over it, and older than any source with a stamp)
+    if (!p.game_built || !p.builder_ok || src.empty() || src == game) return false;
     if (r) {
         *r = Release();
         r->version = version(), r->page = release_page(r->version), r->launcher = false, r->rebuild = true, r->stamp = src;

@@ -50,7 +50,7 @@ bool available(Release *r);
 bool checked();
 void forget_check();   // (the self-test's: as a new start, the check may run again)
 // An update's rebuild still to do: the source beside the launcher says another game stamp than the game was built from
-// (the launcher was closed in it, or the build failed). A game built before stamps were recorded is not asked about
+// (the launcher was closed in it, the build failed, or a download was unpacked over a v1.0.0, whose game has no stamp)
 bool pending(const sys::Paths &p, Release *r);
 
 enum class Stage { Idle, Download, Install, Restart, Build, Switch, Clean, Done, Failed };

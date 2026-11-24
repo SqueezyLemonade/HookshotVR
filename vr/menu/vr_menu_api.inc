@@ -45,7 +45,7 @@ bool icon_pixels(const char* name, int* size, std::vector<unsigned char>& out) {
 bool panel_open() { return panel.open.load(std::memory_order_acquire); }
 void panel_set_open(bool open) {
     if (panel.open.exchange(open, std::memory_order_acq_rel) == open) return;
-    logf("vr: VR menu %s", open ? "opened" : "closed");
+    logf("vr: [%.1f s] VR menu %s", run_s(), open ? "opened" : "closed");
     if (open) {   // (the grips as they are now: what the hands hold stays held while the menu is open)
         std::lock_guard lk(s.pose_mu);
         if (!panel.holding)
@@ -54,6 +54,18 @@ void panel_set_open(bool open) {
     }
 }
 bool window_options_changed() { return window_take_options_changed(); }   // (the Window view's Move mode: window_view.inc)
+/// The hint's words from the buttons' names (each empty: not on this controller): Y is named alone, as only the left hand has it
+std::string menu_hint_words(const std::string& menu, const std::string& upper, bool sticks, bool pads, bool value) {
+    const std::string second = sticks ? (pads ? "both pads" : "both sticks") : upper;
+    if (value) return sticks ? (pads ? "Both pads" : "Both sticks") : upper.empty() ? "Menu" : "Menu or " + upper;
+    std::string out = menu.empty() ? "" : "left " + menu;
+    if (!second.empty()) out += (out.empty() ? "" : " or ") + std::string(sticks || second == "Y" ? "" : "left ") + second;
+    return out.empty() ? "F2" : "Hold " + out;
+}
+std::string menu_hint(bool value) {
+    std::lock_guard lk(s.pose_mu);
+    return menu_hint_words(ctl.menu_name, ctl.upper_name, opts.vr_menu_button == 1, ctl.pads, value);
+}
 bool panel_toggle() {
     if (!panel_open() && menu_is_open()) return false;   // (not over Hookshot's own menu)
     panel_set_open(!panel_open());
@@ -61,8 +73,11 @@ bool panel_toggle() {
 }
 
 /// (host_api.inc, the game side's hands) what the game is told of hand h while the menu holds the controllers: buttons (but
-/// Menu), trigger and stick let go, the grip as when it opened. pose_mu held
+/// Menu), trigger and stick let go, the grip as when it opened. The Menu button row's button also comes as MENU2, menu or
+/// not: its hold opens and closes the menu (vr/input/controllers_host.c vr_menu_y_step). pose_mu held
 void panel_mask(int h, float& trigger, float& squeeze, float* stick, uint32_t* buttons) {
+    const uint32_t second = opts.vr_menu_button == 1 ? HOOKSHOT_VR_BTN_STICK : h ? 0 : HOOKSHOT_VR_BTN_UPPER;
+    if (buttons && (*buttons & second)) *buttons |= HOOKSHOT_VR_BTN_MENU2;
     if (!panel.holding) return;
     if (!panel_open()) {   // (closed: held until everything is let go, so the press that closed it stays the menu's)
         bool down = false;
@@ -76,7 +91,7 @@ void panel_mask(int h, float& trigger, float& squeeze, float* stick, uint32_t* b
     squeeze = std::min(squeeze, panel.grip_held[h]);   // (a grip let go meanwhile is let go: it is not squeezed again)
     panel.grip_held[h] = squeeze;
     if (stick) stick[0] = stick[1] = 0;
-    if (buttons) *buttons &= HOOKSHOT_VR_BTN_MENU;
+    if (buttons) *buttons &= HOOKSHOT_VR_BTN_MENU | HOOKSHOT_VR_BTN_MENU2;
 }
 
 bool panel_hands(PanelHand out[2]) {

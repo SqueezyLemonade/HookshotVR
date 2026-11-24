@@ -3,6 +3,10 @@
 
 // ---- state -------------------------------------------------------------------------------------------------------------------
 
+/// Seconds since the program started, for the log's lines (they have no time of their own)
+const std::chrono::steady_clock::time_point run_start = std::chrono::steady_clock::now();
+double run_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - run_start).count(); }
+
 constexpr int kSlots = 4;   // (the headset's copies of the game's pictures: one being written while the eyes read another)
 constexpr int kMenuSlots = 3;
 constexpr int kPoses = 64;
@@ -42,6 +46,7 @@ struct MenuSlot {
 struct Pose {
     uint32_t seq = 0;
     XrPosef pose{};            // the head in the runtime's local space
+    XrTime time = 0;           // the display time it was located for
     float view[12]{};          // the view the game built with it (hookshot_vr_drawn), all 0 until then
     bool drawn = false;
 };
@@ -85,6 +90,7 @@ struct State {
     VkSemaphore timeline = VK_NULL_HANDLE;
     uint64_t timeline_value = 0;
     uint64_t pending_value = 0;         // the present's signal still to be added to its submit
+    uint64_t offscreen_main = 0, offscreen_value = 0;   // (no window: present_done_at's replay value, and the slot's to signal)
     MenuSlot menus[kMenuSlots];
     int next_menu = 0, writing_menu = -1;
     std::atomic<int> reading_menu{-1};
@@ -110,10 +116,11 @@ struct State {
     VkSampler linear = VK_NULL_HANDLE, point = VK_NULL_HANDLE;
     VkDescriptorSetLayout warp_dsl = VK_NULL_HANDLE, depth_dsl = VK_NULL_HANDLE;
     VkPipelineLayout warp_layout = VK_NULL_HANDLE, depth_layout = VK_NULL_HANDLE;
-    VkPipeline warp = VK_NULL_HANDLE, depth_copy = VK_NULL_HANDLE;
+    VkPipeline warp = VK_NULL_HANDLE, warp_splat = VK_NULL_HANDLE, depth_copy = VK_NULL_HANDLE;
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet warp_sets[kSlots][2]{};
     Image eye_out[2];
+    Image landed[2];   // (From depth's pass 1, vr_warp_splat.comp: per eye pixel, the nearest source's shift that landed there)
 
     // the head (the headset thread writes, the game thread reads)
     std::mutex pose_mu;
@@ -124,6 +131,13 @@ struct State {
     int recenter_seen = -1;
     float ipd = 0.063f;
     float fov_tan_x = 1.0f, fov_tan_y = 1.0f; // OpenXR's two eye FOVs, enclosed by one symmetric game camera
+    XrPosef eye_pose[2]{};                    // each eye from the head as located (its place and turn), for a frame both eyes share
+    bool eye_pose_ok = false;
+    XrFovf eye_fov[2]{};                      // each eye's own FOV as located (asymmetric), for the projection layer
+    bool eye_fov_ok = false;                  // located, finite, and the eyes not turned from the head (no canted displays)
+    // (the 10 s 3D line: present's gameplay frames, those with the scene's depth, in true stereo, with the right eye's own
+    // picture, and why not: no second depth layer, the presented image not two-layer)
+    std::atomic<uint32_t> n_play{0}, n_depth{0}, n_eyes{0}, n_eye2{0}, n_no_depth2{0}, n_not_two_layer{0};
     std::atomic<bool> camera_owned{false};   // false for titles, menus and scripted cameras
     std::atomic<bool> menu169{false};        // a full-screen 2D menu is up (menu_tick, each present)
     // Link's root and age from the guest thread, for the same camera pose. Kept with the pose ring so a replay cannot combine
@@ -233,6 +247,8 @@ struct WarpPush {
     float proj[4];      // |P00|, |P11|, -a, b: the view distance of a depth d is b / (d - a) (fsr3_math.h's camera)
     float offset[4];    // the eye's offset from where the game drew: x right, y up (metres)
     float steps, max_shift, near_plane, debug;
+    float head[2];      // the head's movement since the picture was drawn, x right, y up (metres): faded out near the eye
+    float pad[2];
 };
 
 bool make_pipelines() {
@@ -244,13 +260,14 @@ bool make_pipelines() {
     sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
     if (vkCreateSampler(dev.device, &sc, nullptr, &s.point) != VK_SUCCESS) return false;
 
-    // the warp: the picture, its depth, an eye's storage image
-    VkDescriptorSetLayoutBinding wb[3] = {
+    // the warp: the picture, its depth, an eye's storage image, and its landed image (both passes use the one layout)
+    VkDescriptorSetLayoutBinding wb[4] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {3, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo dl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dl.bindingCount = 3;
+    dl.bindingCount = 4;
     dl.pBindings = wb;
     if (vkCreateDescriptorSetLayout(dev.device, &dl, nullptr, &s.warp_dsl) != VK_SUCCESS) return false;
     // the depth copy: the game's depth, an R32F storage image
@@ -288,11 +305,12 @@ bool make_pipelines() {
         return ok;
     };
     if (!compute(s.warp_layout, VR_WARP_COMP_SPV, sizeof VR_WARP_COMP_SPV, &s.warp) ||
+        !compute(s.warp_layout, VR_WARP_SPLAT_COMP_SPV, sizeof VR_WARP_SPLAT_COMP_SPV, &s.warp_splat) ||
         !compute(s.depth_layout, VR_DEPTH_COMP_SPV, sizeof VR_DEPTH_COMP_SPV, &s.depth_copy))
         return false;
 
     VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * 2 * kSlots + 1},
-                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * kSlots + 1}};
+                                  {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * 2 * kSlots + 1}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = 2 * kSlots + 1;
     pi.poolSizeCount = 2;

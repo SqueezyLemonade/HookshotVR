@@ -1,10 +1,6 @@
 // Hookshot VR: The headset frame loop: tracking, completed-frame selection and compositor submission.
 // Included by vr/headset/vk_vr.cpp in the order shown there; not a separate compilation unit.
 
-// Extra camera coverage accommodates motion between rendering and display. Tangents are dimensionless, not degrees.
-constexpr float kCameraGuardBand = 1.03f;
-constexpr float kMaxCameraHalfFovTangent = 3.0f;
-
 // ---- a frame with nothing to show: one blank layer, never none (WiVRn showed black and dropped the controllers' input after
 // frames with zero layers). A transparent 4 x 4 quad, made once (a static image), head-locked a metre ahead ----
 Eye blank_eye;
@@ -130,10 +126,15 @@ void headset_thread() {
         XrPosef head{{0, 0, 0, 1}, {0, 0, 0}};
         bool head_ok = XR_SUCCEEDED(xrLocateSpace(s.view, s.local, fs.predictedDisplayTime, &loc)) &&
                        (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
-        if (head_ok) head = loc.pose, publish_pose(head);
+        if (head_ok) head = loc.pose, publish_pose(head, fs.predictedDisplayTime);
         const bool head_tracked = head_ok && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);   // (the Window view's eyes)
         XrView eye_view[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};   // (the eyes from the head, as located: the Window view's)
         bool eye_view_ok = false;
+        XrView room_view[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};   // (the eyes in the room, as located: a flat frame's views)
+        XrViewStateFlags room_flags = 0;
+        bool room_view_ok = false;
+        flat_screen.display_time = fs.predictedDisplayTime;
+        shared_pose = SharedPose{};
         update_controls(fs.predictedDisplayTime);   // (OoT VR: the hands)
         if (ctl.attached && frames % 450 == 0) note_profiles();
         {   // OpenXR's real eye frusta drive the game camera as well as this projection layer.
@@ -151,10 +152,40 @@ void headset_thread() {
                     tx = std::max(tx, std::max(std::tan(-xv[e].fov.angleLeft), std::tan(xv[e].fov.angleRight)));
                     ty = std::max(ty, std::max(std::tan(xv[e].fov.angleUp), std::tan(-xv[e].fov.angleDown)));
                 }
+                // (each eye's own FOV, for the projection layer: located_eye_cut. Not for eyes turned from the head (canted
+                // displays): their FOV is in a frame of their own, which a cut of the head's picture is not)
+                bool own_ok = std::isfinite(tx) && std::isfinite(ty);
+                for (int e = 0; e < 2; e++)
+                    own_ok = own_ok && std::fabs(xv[e].pose.orientation.w) > 0.99996f && xv[e].fov.angleLeft < xv[e].fov.angleRight &&
+                             xv[e].fov.angleDown < xv[e].fov.angleUp;
+                static bool eyes_said = false;
+                if (!eyes_said) {   // (once, for a player's log: each eye as the runtime locates it)
+                    eyes_said = true;
+                    XrViewConfigurationView cv[2] = {{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
+                    uint32_t ncv = 0;
+                    const bool have_cv = XR_SUCCEEDED(xrEnumerateViewConfigurationViews(
+                                             s.inst, s.system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &ncv, cv)) && ncv == 2;
+                    for (int e = 0; e < 2; e++) {
+                        const XrView& x = xv[e];
+                        logf("vr: eye %s: at %.1f %.1f %.1f mm from the head, turned %.2f deg; fov L/R/U/D %.2f %.2f %.2f %.2f deg; "
+                             "recommended %ux%u", e ? "R" : "L", x.pose.position.x * 1000, x.pose.position.y * 1000,
+                             x.pose.position.z * 1000, 2 * std::acos(std::min(1.0f, std::fabs(x.pose.orientation.w))) * 57.2958f,
+                             x.fov.angleLeft * 57.2958f, x.fov.angleRight * 57.2958f, x.fov.angleUp * 57.2958f,
+                             x.fov.angleDown * 57.2958f, have_cv ? cv[e].recommendedImageRectWidth : 0u,
+                             have_cv ? cv[e].recommendedImageRectHeight : 0u);
+                    }
+                    const XrViewStateFlags valid = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
+                    if ((vs.viewStateFlags & valid) != valid)
+                        logf("vr: the eyes' view state %#llx: position or orientation not valid yet", (unsigned long long)vs.viewStateFlags);
+                    if (!own_ok) logf("vr: each eye's own FOV not used for the layer (eyes turned from the head, or none located)");
+                }
                 if (std::isfinite(tx) && std::isfinite(ty) && tx > 0.2f && ty > 0.2f) {
                     std::lock_guard lk(s.pose_mu);
                     s.fov_tan_x = std::min(tx * kCameraGuardBand, kMaxCameraHalfFovTangent);
                     s.fov_tan_y = std::min(ty * kCameraGuardBand, kMaxCameraHalfFovTangent);
+                    s.eye_fov[0] = xv[0].fov, s.eye_fov[1] = xv[1].fov, s.eye_fov_ok = own_ok;
+                    s.eye_pose[0] = xv[0].pose, s.eye_pose[1] = xv[1].pose;
+                    s.eye_pose_ok = eye_pose_usable(xv[0]) && eye_pose_usable(xv[1]);
                 }
                 if (frames % 90 == 0) {   // the eye distance, now and then
                     const float dx = xv[1].pose.position.x - xv[0].pose.position.x,
@@ -165,6 +196,10 @@ void headset_thread() {
                 }
             }
             frames++;
+            vli.space = s.local;
+            XrViewState rs{XR_TYPE_VIEW_STATE};
+            room_view_ok = XR_SUCCEEDED(xrLocateViews(s.session, &vli, &rs, 2, &nv, room_view)) && nv == 2;
+            if (room_view_ok) room_flags = rs.viewStateFlags;
         }
         XrCompositionLayerProjectionView views[2];
         XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
@@ -186,6 +221,16 @@ void headset_thread() {
         if (fs.shouldRender && head_ok) {
             // the newest slot the GPU finished
             uint64_t done = 0;
+            {   // (no window: the slot's value signalled here once the replay is past its submit, present_done_at)
+                std::lock_guard lk(s.mu);
+                if (s.offscreen_value && vk_timeline_done() >= s.offscreen_main) {   // (from the CPU: no submit)
+                    VkSemaphoreSignalInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+                    si.semaphore = s.timeline, si.value = s.offscreen_value;
+                    vkGetSemaphoreCounterValue(dev.device, s.timeline, &done);
+                    if (done < si.value) vkSignalSemaphore(dev.device, &si);
+                    s.offscreen_value = 0;
+                }
+            }
             vkGetSemaphoreCounterValue(dev.device, s.timeline, &done);
             int k = -1, mk = -1;
             int ke[2] = {-1, -1};
@@ -208,19 +253,14 @@ void headset_thread() {
                 flat_screen.shown = flat_screen.open = false;   // (no world screen: the next flat frame's opens where you are)
                 const int n = window_layers(k, head, head_tracked, eye_view_ok ? eye_view : nullptr, window_layer);
                 for (int e = 0; e < n; e++) layers[n_layers++] = window_layer.list[e];
-            } else if (k >= 0 && make_eyes(ke, k, head, views)) {
-                // (A flat frame (the title, menus, story cutscenes on the screen, movies) is the eyes' projection layer, each eye
-                // posed at the world screen's fixed heading and Screen size wide: the compositor holds it where it opened as the
-                // head turns, at no distance. The world screen's room-fixed quad (D, 21 Nov) showed a line along its right and
-                // bottom edges that moved with the head, and the same picture sent this way showed none (the user's A/B, 22 Nov),
-                // the cause not found; RX_VR_FLAT_LAYER=quad (a test) sends the quad again)
-                static const bool flat_as_projection = [] {
-                    const char* e = vr_research_getenv("RX_VR_FLAT_LAYER");
-                    const bool quad = e && !strcmp(e, "quad");
-                    if (quad) logf("vr: RX_VR_FLAT_LAYER=quad (test): flat frames on the world screen's quad, 3.5 m ahead");
-                    return !quad;
-                }();
-                if (!flat_as_projection && flat_screen_quad(flat_quad)) {   // (a flat frame: the world screen, fixed in the room: eye_rendering.inc)
+            } else if (const int flat = k >= 0 ? flat_eyes_views(k, head, room_view_ok ? room_view : nullptr, room_flags, views) : -1;
+                       flat > 0 || (flat == 0 && make_eyes(ke, k, head, views))) {
+                // (A flat frame (the title, menus, story cutscenes on the screen, movies): RX_VR_FLAT_LAYER. eyes, the
+                // default: the room-fixed screen drawn into each eye's own view (flat_eyes.inc). projection: each eye posed at
+                // the screen's fixed heading and Screen size wide, at no distance. quad: the world screen's room-fixed quad (D,
+                // 21 Nov), which showed a line along its right and bottom edges that moved with the head on WiVRn (the user's
+                // A/B, 22 Nov), the cause not found)
+                if (flat_mode() == kFlatQuad && flat_screen_quad(flat_quad)) {   // (a flat frame: the world screen, fixed in the room: eye_rendering.inc)
                     layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&flat_quad;
                 } else {
                     layer.space = s.local;
@@ -295,7 +335,8 @@ void headset_thread() {
                 layers[0] = (const XrCompositionLayerBaseHeader*)&room_layer, n_layers++;
             }
         }
-        {   // (research, bounded: every layer of a flat frame, once as the world screen opens and once 3 s later: what draws the
+        bool flat_told = false;
+        {   // (bounded: every layer of a flat frame, once as the world screen opens and once 3 s later: what draws the
             // line along its right and bottom edges that moves with the head, headset 22 Nov)
             static bool was_flat = false;
             static int64_t opened = 0;
@@ -304,8 +345,8 @@ void headset_thread() {
             if (flat_screen.shown && !was_flat) opened = t, phase = 0;
             was_flat = flat_screen.shown;
             if (flat_screen.shown && told < 8 && ((phase == 0) || (phase == 1 && t - opened > 3000))) {
-                told++, phase++;
-                logf("vr: flat frame's layers (%u, %s):", n_layers, phase == 1 ? "as it opened" : "3 s later");
+                told++, phase++, flat_told = true;
+                logf("vr: [%.1f s] flat frame's layers (%u, %s):", run_s(), n_layers, phase == 1 ? "as it opened" : "3 s later");
                 for (uint32_t i = 0; i < n_layers; i++) {
                     const XrCompositionLayerBaseHeader* b = layers[i];
                     const char* space = b->space == s.local ? "room" : b->space == s.view ? "head" : "other";
@@ -339,12 +380,30 @@ void headset_thread() {
         const XrResult ended = xrEndFrame(s.session, &ei);
         if (XR_FAILED(ended))   // (refused: none of the frame's layers is shown)
             headset_fail("xrEndFrame refused the frame (%d, %u layers): nothing of it shown", (int)ended, n_layers);
+        if (flat_told) flat_log(layer.viewCount ? &layer : nullptr, head, room_view_ok ? &room_view[0] : nullptr, room_flags, ended);
+        const TesterQuad named[] = {{"the VR menu", &panel_quad}, {"the wrist HUD", &wrist_quad}, {"the radial menu", &radial_quad},
+                                    {"Hookshot's own menu", &menu_layer}, {"the vignette", &vignette_quad}, {"a flat frame", &flat_quad},
+                                    {"nothing to show (blank)", &blank_quad}};
+        tester_frame(layers, n_layers, named, (int)(sizeof named / sizeof named[0]), fs, head, room_view_ok ? &room_view[0] : nullptr, room_flags,
+                     ended, flat_told);
         window_frame_ended(ended);   // (the Window view's room: a refused way given up)
         queue_lk.unlock();
         const int64_t now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (now - said >= 10) {
             said = now;
             logf("vr: %d headset frames shown in the last 10 s (eye distance %.1f mm)", shown, s.ipd * 1000);
+            {   // (the 3D: how many gameplay frames had the scene's depth, and in true stereo the right eye's own picture)
+                const uint32_t play = s.n_play.exchange(0), depth = s.n_depth.exchange(0), eyes = s.n_eyes.exchange(0),
+                               eye2 = s.n_eye2.exchange(0), no2 = s.n_no_depth2.exchange(0), not2 = s.n_not_two_layer.exchange(0);
+                if (play) {
+                    logf("vr: 3D %s: %u of %u gameplay frames with the scene's depth, %u in Stereo with each eye's own picture "
+                         "(%u without: %u no second depth, %u not two-layer)", opts.vr_stereo == 0 ? "Mono" : opts.vr_stereo == 4 ?
+                         "Stereo" : "From depth", depth, play, eye2, eyes - std::min(eyes, eye2), no2, not2);
+                    static bool flat_said = false;
+                    if (!depth && play >= 100 && opts.vr_stereo != 0 && !flat_said)
+                        flat_said = true, logf("vr: gameplay frames have no scene depth: both eyes see one picture (no stereo)");
+                }
+            }
             for (int h = 0; h < 2 && ctl.attached; h++) {   // (each hand from the head, in the head's frame: x right, y up, z back)
                 const HandState& hs = ctl.now[h];
                 if (!hs.valid) {

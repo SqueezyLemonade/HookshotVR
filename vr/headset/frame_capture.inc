@@ -114,6 +114,14 @@ bool scene_depth_is(const Texture* depth) {
     std::lock_guard lk(s.mu);
     return s.scene_depth == depth && s.scene_frame != ~0ull && texture_frame_no() - s.scene_frame <= kSceneDepthFrames;
 }
+/// (vk_draw.cpp vr_scene_network) whether a texture is this frame's scene colour, as its largest draw used it: the input of
+/// the game's gameplay upscale at every Render resolution (the shares below 100% each have a network of their own)
+bool scene_color_is(const Texture* color) {
+    if (!color) return false;
+    std::lock_guard lk(s.mu);
+    return s.scene_color == color && s.scene_frame != ~0ull && texture_frame_no() - s.scene_frame <= 1 &&
+           s.scene_gen == texture_destroy_generation();
+}
 /// Whether the scene's depth has been seen lately (scene_depth_is can answer)
 bool scene_depth_known() {
     std::lock_guard lk(s.mu);
@@ -229,8 +237,8 @@ void present(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t sh, const i
     for (int tries = 0; tries < kSlots && (k == s.reading[0].load() || k == s.reading[1].load()); tries++) k = (k + 1) % kSlots;
     s.next_slot = (k + 1) % kSlots;
     Slot& sl = s.slots[k];
-    if (!make_image(sl.color, VK_FORMAT_R8G8B8A8_UNORM,
-                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, (uint32_t)w, (uint32_t)h))
+    if (!make_image(sl.color, VK_FORMAT_R8G8B8A8_UNORM,   // (TRANSFER_SRC: 3D Flat copies it into the eyes as it is)
+                    VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, (uint32_t)w, (uint32_t)h))
         return;
     sl.value = 0;   // (not usable until this present's submit is done)
     memory_barrier(cmd);
@@ -295,6 +303,8 @@ void present(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t sh, const i
             sl.has_eye2 = true;
             static bool said;
             if (!said) said = true, logf("vr: true stereo: each eye its own picture (%dx%d), drawn by the game", w, h);
+        } else if (sl.eyes_mode) {
+            (!s.depth_snap2_valid ? s.n_no_depth2 : s.n_not_two_layer).fetch_add(1, std::memory_order_relaxed);
         }
     } else {
         // A menu frame is deliberately flat, but keeps the current camera's FOV. Non-gameplay frames fall back safely in make_eyes.
@@ -302,10 +312,23 @@ void present(VkCommandBuffer cmd, VkImage src, uint32_t sw, uint32_t sh, const i
         std::memcpy(sl.proj, s.depth_snap_valid ? s.snap_proj : s.scene_proj, sizeof sl.proj);
         if (!sl.depth.image) make_image(sl.depth, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, 16, 16);
     }
+    if (!sl.head_locked) {   // (the 10 s 3D line, frame_loop.inc)
+        s.n_play.fetch_add(1, std::memory_order_relaxed);
+        if (sl.has_depth) s.n_depth.fetch_add(1, std::memory_order_relaxed);
+        if (sl.eyes_mode) s.n_eyes.fetch_add(1, std::memory_order_relaxed);
+        if (sl.has_eye2) s.n_eye2.fetch_add(1, std::memory_order_relaxed);
+    }
     s.depth_snap_valid = false;
     s.depth_snap2_valid = false;
     sl.value = ++s.timeline_value;
     s.pending_value = sl.value;
+}
+
+void present_done_at(uint64_t main_value) {
+    VkSemaphoreSubmitInfo sig;
+    if (!present_signal(sig)) return;
+    std::lock_guard lk(s.mu);
+    s.offscreen_main = main_value, s.offscreen_value = sig.value;   // (a newer one stands for the one before: the timeline only rises)
 }
 
 bool present_signal(VkSemaphoreSubmitInfo& out) {

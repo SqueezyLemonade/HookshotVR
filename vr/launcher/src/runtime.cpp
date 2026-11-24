@@ -136,6 +136,7 @@ static void check(VrState &s) {
     } else if (r.is == kRuntimeWiVRn) {
         // (WiVRn says on D-Bus whether its server runs and a headset is connected; without D-Bus, its process)
         bool running = false, headset = false;
+        s.servers = *plat::wivrn_process() ? plat::process_count(plat::wivrn_process()) : 0;
         if (plat::wivrn_status(&running, &headset)) {
             s.session = running ? Check::Ok : Check::Waiting;
             s.headset = headset ? Check::Ok : Check::Waiting;

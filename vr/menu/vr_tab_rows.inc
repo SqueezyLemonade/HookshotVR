@@ -48,12 +48,15 @@
      nullptr, false, true},
     {TAB_STORED, "Recentre", &opts.vr_recenter, 0, 1, 1, tx_vr_recenter,
      "Makes the way you look now straight ahead.", nullptr, false, true},
-    {TAB_STORED, "3D", &opts.vr_stereo, 1, 4, 3, tx_vr_stereo,   // (1 From depth, 4 True stereo)
-     "From depth: each eye is made from one picture and its depth (lighter on the PC). True stereo: the game draws both eyes "
-     "in every frame (exact 3D, heavier).",
+    {TAB_STORED, "3D", &opts.vr_stereo, 0, 4, 1, tx_vr_stereo,   // (0 Mono, 4 Stereo, 1 From depth when offered: vr_options.inc)
+     "Mono: both eyes see the same picture (no 3D, the lightest). Stereo: the game draws each eye in every frame (exact 3D, "
+     "heavier).",
      nullptr, false, true},
     {TAB_STORED, "3D strength", &opts.vr_depth_scale, 0, 300, 10, tx_percent,
      "How far apart the eyes are in the game: 100% is your own. More makes the world look smaller.", nullptr, false, true},
+    {TAB_STORED, "Near depth", &opts.vr_near_depth, 0, 2, 1, tx_vr_near_depth,
+     "From depth: how far things near you stand out. Low keeps the gaps beside your hands and sword small; Full is all of it.",
+     nullptr, false, true},
     {TAB_STORED, "3D quality", &opts.vr_quality, 8, 64, 8, tx_vr_steps,
      "How finely each eye searches the depth: more is cleaner at edges and costs more of the GPU.", nullptr, false, true},
     {TAB_STORED, "Eye resolution", &opts.vr_eye_height, 0, 4320, 360, tx_vr_eye,
@@ -177,6 +180,9 @@
     {TAB_STORED, "GPU profile", &opts.vr_gpu_profile, 0, 1, 1, tx_onoff,
      "Diagnostics: from the next start, the log names what the GPU spends each frame on (every 10 s). Costs speed: it also "
      "makes the replay use one thread.", nullptr, true, true},
+    {TAB_STORED, "VR menu button", &opts.vr_menu_button, 0, 1, 1, tx_vr_menu_button,
+     "What opens and closes this menu, held half a second. Menu or Y: the left upper button, named Y or B. Both sticks: both "
+     "stick (or trackpad) clicks together. The left Menu button does it either way, and F2 on the keyboard.", nullptr, false, true},
     {TAB_STORED, "VR menu position", &opts.vr_menu_position, 0, 1, 1, tx_vr_menu_position,
      "Where the VR menu floats. Fixed in world: where it opened, in front of you, and it stays there while you look around "
      "or walk. Follows your head: it comes back in front of you once you turn away from it.", nullptr, false, true},

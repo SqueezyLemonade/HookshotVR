@@ -24,13 +24,54 @@ running**, and **Play** says **Waiting**.
 ## The headset shows nothing
 
 - Check the launcher: the **HookshotVR** card, not **Hookshot** (which is flat on your monitor), with **Headset**
-  **Connected**. **Play** waits for it.
-- **Waiting** or **Unknown** under **Headset**: put the headset on and connect it in your VR app (for a Quest: WiVRn,
-  Quest Link or Virtual Desktop in the headset). Restart the VR app if it stays stuck.
+  **Connected**.
+- **Waiting** under **Headset**: put the headset on and connect it in your VR app (for a Quest: WiVRn, Quest Link or
+  Virtual Desktop in the headset). Restart the VR app if it stays stuck. **Play** is never blocked: if the launcher is
+  wrong, press it and answer "Headset not found. Play anyway?" with **Play**.
+- **2 running** on the runtime row: two WiVRn servers are running, and the launcher may have asked the one without the
+  headset. Close the one you do not use.
+- **Not checked** under **Headset** with SteamVR: normal. The launcher does not start SteamVR just to look.
+  **Play** works.
 - Start the game after the runtime and the headset are ready. A game started without them runs flat on your monitor,
   and the log says `vr: no headset ... VR off this run`.
 - Only one VR app can hold the headset. Close other VR games and overlays.
 - Black, then a crash, or white textures: see below.
+
+## SteamVR opens its dashboard instead of the VR menu
+
+SteamVR can keep the left Menu button for its own dashboard, so holding it may not open our VR menu. Any one of these
+works:
+
+- **Hold Y** (the left controller's upper face button; on Index, the left **B**) for half a second. It works on every
+  runtime.
+- **Press F2** on the keyboard, with the game window active.
+- In the VR menu (**Body** › **Controls**) or the launcher's **Settings**, set **Menu button** to **Both sticks**, and
+  click both sticks together.
+- In SteamVR: **Settings** › **Advanced** › **Dashboard**, turn **VR Dashboard on System Button** Off.
+- In SteamVR's controller bindings, rebind the **Menu** action to another button.
+
+Vive wands and older Windows Mixed Reality controllers have no Y: use **Both sticks**, Menu or F2.
+
+## The picture looks flat, doubled or far away on Meta's PC runtime
+
+You see one flat picture, or things look far away like a screen wrapped around your head, or doubled, on the title, the
+menus or in the game. This was reported on Rift S and Rift CV1 with the Meta (Oculus) PC runtime (Quest Link, Air Link,
+Rift).
+
+**We have not confirmed a fix.** v1.0.2 changes how the title, the menus, the movies and the game are sent to the
+headset, and we could not test it on Meta's runtime. If it is still wrong for you, please help: the steps are in
+[Testing on Meta's runtime](vr-test-meta.md), and the logs in [How to send a log](#how-to-send-a-log). Things to try:
+
+- **3D: Stereo** in the VR menu (**General**). **Mono** shows both eyes one picture, with no depth, by design.
+- In the game's own menu (**F1** or **Insert**): **Render resolution** 100% instead of **Auto**.
+- **SteamVR** instead of the Meta runtime. One player reported it working on the same PC. It is a thing to try, not a
+  promise.
+- Lines for `hookshot_env.txt` (one per line, then start the game again): `RX_VR_FLAT_LAYER=eyes` (default), `quad` or
+  `projection`; `RX_VR_MONO_POSE=eyes` (default) or `head`; `RX_VR_LAYER_FOV=located` (default) or `symmetric`.
+
+**Fixed in v1.0.2 (seen on a Rift CV1):** below 100% **Render resolution**, **Stereo** gave both eyes one picture, as
+if the eye distance were wrong. On an older version, set **Render resolution** to 100% (not **Auto**) in the game's own
+menu.
 
 ## A controller is not detected
 
@@ -62,14 +103,16 @@ To turn it on:
 To check it: near the start of the log, the `vk: policy: facts` line says `resizable BAR 1` when it is on and
 `resizable BAR 0` when it is off.
 
-If it is on and textures still go white, lower **Eye resolution** (VR menu, **Graphics**), or choose **3D: From depth**
-(VR menu, **General**).
+If it is on and textures still go white, lower **Eye resolution** (VR menu, **Graphics**), or choose **3D: Mono**
+(VR menu, **General**), which sends one picture instead of two.
 
 ## The first start is slow and stutters
 
 The first time, and each new area the first time you enter it, the game prepares its shaders. It can freeze for a few
 seconds and show blurry textures, and the **Shaders** step of the first build is the longest of all. This is normal and
-passes: later visits are smooth. See [Known issues](vr-known-issues.md#stutter-when-you-enter-an-area).
+passes: later visits are smooth. See [Known issues](vr-known-issues.md#stutter-when-you-enter-an-area). On Windows the
+graphics driver's own shader cache stays on C: and can grow by a few GB after the first preparation
+([Which drive is used](#which-drive-is-used)).
 
 ## The view is turned, too high or too low
 
@@ -100,19 +143,22 @@ On Windows the driver's cache is the driver's: it fills while the first build pr
 A log helps us find what went wrong. Send it with a short description: what you did, where you were in the game, your
 graphics card, your headset and your VR app, and your system (Windows or Linux).
 
-**Where the logs are.** In the launcher, **Settings**, **Logs**, **Open** opens the folder. It is:
+**Where the logs are.** In the launcher, **Settings** › **Logs** › **Open** opens the folder. It is:
 
 - Linux: `~/.local/share/HookshotVR/logs`
 - Windows: `%LOCALAPPDATA%\HookshotVR\logs`
 
 In it:
 
-- `last-run.log` is the game's last run (and `last-run.1.log` the one before). **Send this for a problem in the game.**
+- `last-run.log` is the game's last run, and `last-run.1.log` to `last-run.5.log` the five before it (the newest is `.1`;
+  the oldest is dropped at the next start). **Send `last-run.log` for a problem in the game**, and the one before it if you
+  started the game again after the problem. When we ask for more than one run, send the whole **Logs** folder.
 - `build.log` is the last build. Send it for a problem building.
 - `crashes/` has the crash reports. After a crash, the crash window also has **Report**, which copies the same kind of
   report (the error, your PC's hardware and the end of the log) to the clipboard.
 
 **What is in them:** the logs have your home folder and your user name taken out, so they are safe to send as they are.
-Please look at one first if you want to be sure. Never send game files, saves, or anything from the `romfs` folder.
+They also hold lines that help us: your runtime, the headset's eye views, your VR options and what was sent to the headset. Please look at one
+first if you want to be sure. Never send game files, saves, or anything from the `romfs` folder.
 
 Report problems with VR to HookshotVR (on its GitHub page, as an issue), not to Hookshot.

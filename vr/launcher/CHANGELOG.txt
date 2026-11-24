@@ -1,3 +1,13 @@
+v1.0.2
+Alpha v1.0.2: an easier start, and 3D changes for Rift players
+3D is Mono (the default) or Stereo; Stereo's picture below 100% Render resolution is fixed
+Title, menus and gameplay are sent to the headset differently: help us test on Meta
+First person is the default; View, 3D and Menu button are in Settings
+Hold Menu or Y half a second, or press F2, for the VR menu
+Play is never blocked: "Headset not found. Play anyway?"
+Two WiVRn servers say "2 running"; SteamVR's headset row reads "Not checked"
+Six runs' logs are kept, and say much more for bug reports
+
 v1.0.1
 Alpha v1.0.1: the launcher updates itself from GitHub releases
 A launcher-only update keeps your game: no rebuild

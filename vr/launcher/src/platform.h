@@ -36,7 +36,7 @@ struct Proc {
     bool ok() const { return pid != -1; }
 };
 // Started in a group of its own (it outlives the launcher, and kill_tree stops what it started too). argv[0] without a
-// folder is looked for on PATH. Out::File: stdout and stderr into file (made new)
+// folder is looked for on PATH. Out::File: stdout and stderr added to file's end
 Proc spawn(const std::vector<std::string> &argv, const Env &env, const std::string &cwd, Out out, const std::string &file = "");
 long read_out(Proc &p, char *buf, long n);   // <= 0 at the end
 void close_out(Proc &p);
@@ -44,7 +44,10 @@ bool exited(Proc &p, int *code);   // (reaps it; true once it has ended, then p 
 int wait(Proc &p);
 void kill_tree(Proc &p);
 void forget(Proc &p);              // nobody asks how it ends (spawn_quiet's)
+// A message the player sees without a terminal (Windows: a message box; elsewhere stderr only, as nothing else is sure to show)
+void error_box(const char *title, const char *text);
 bool process_running(const char *name);   // a process of that name, without .exe ("hookshot", "vrserver")
+int process_count(const char *name);      // how many (two WiVRn servers: the launcher may ask the one without the headset)
 bool on_path(const char *tool);
 // The system's own copy of a tool the update runs ("curl", "tar"): Windows' System32\curl.exe and tar.exe (Windows 10 1803
 // and later; tar.exe is bsdtar, which unpacks a .zip), never one found first on PATH or beside the launcher. Linux: the one

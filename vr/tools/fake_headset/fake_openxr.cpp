@@ -5,7 +5,7 @@
 // below. What runs is the game's own headset thread, eyes, timeline and queue: swapchain images are real Vulkan images made
 // on the game's device, and each swapchain image's acquire and release submits a barrier to the headset's queue (index 1) from the
 // calling thread, as WiVRn's in-process client does (its image barriers). Frames are paced at FAKE_XR_HZ (90), the head
-// turns FAKE_XR_TURN degrees each side (25) over 8 s, the hands hang still with nothing pressed. Every 10 s one line on
+// turns FAKE_XR_TURN degrees each side (25) over 8 s (tilted FAKE_XR_PITCH degrees, 0), the hands hang still with nothing pressed. Every 10 s one line on
 // stderr: the frames ended and the layers they carried. A dev tool for this PC: never shipped, holds nothing of the game.
 //
 // Faults, for the headset path's failure handling (vr/headset/eye_rendering.inc headset_submit, each logged on stderr):
@@ -17,6 +17,15 @@
 // Layers, for the headset's world marks (the aim reticles, vr/items/aim):
 //   FAKE_XR_QUADS=1           once a second, each quad layer of the frame on stderr: its place (local space, m), size and
 //                             swapchain, and the head the frame was made with
+// The eyes, for the projection layer's per-eye FOV (vr/headset/eye_rendering.inc located_eye_cut):
+//   FAKE_XR_FOV=<l>,<r>,<u>,<d>  the left eye's FOV in degrees (left and down negative), the right eye's its mirror image: an
+//                             asymmetric headset's, as a Rift's (default: a symmetric 106 x 108 degrees)
+//   FAKE_XR_CANT=<l>[,<r>]    the eyes turned outward by that many degrees (canted displays, 0; one value: both)
+//   FAKE_XR_SWAY=<m>          the head also moves that far each side and as far up and down (0), over 5 s
+//   FAKE_XR_MENU_AT=<s>[,..]  the menu button held 0.9 s at each of those seconds (the VR menu opened and closed)
+//   FAKE_XR_DUMP=<folder>     every FAKE_XR_DUMP_S seconds (20), at most FAKE_XR_DUMP_N times (6), each projection view's
+//                             swapchain image as <folder>/eye<n>-<view>.ppm, and its pose, fov and imageRect on stderr, with each eye's
+//                             located pose; a frame with no projection layer: its first quad (view 9) with its pose and size
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -80,6 +89,12 @@ PFN_vkWaitForFences wait_fences = nullptr;
 PFN_vkResetFences reset_fences = nullptr;
 PFN_vkCreateSemaphore create_semaphore = nullptr;
 PFN_vkSignalSemaphore signal_semaphore = nullptr;
+PFN_vkCreateBuffer create_buffer = nullptr;   // (FAKE_XR_DUMP's readback)
+PFN_vkDestroyBuffer destroy_buffer = nullptr;
+PFN_vkGetBufferMemoryRequirements buffer_reqs = nullptr;
+PFN_vkBindBufferMemory bind_buffer = nullptr;
+PFN_vkMapMemory map_memory = nullptr;
+PFN_vkCmdCopyImageToBuffer cmd_copy_to_buffer = nullptr;
 
 bool load_vulkan(VkInstance instance) {
     if (!gipa) {
@@ -118,6 +133,12 @@ bool load_device(VkDevice device) {
     D(vkResetFences, reset_fences);
     D(vkCreateSemaphore, create_semaphore);
     D(vkSignalSemaphore, signal_semaphore);
+    D(vkCreateBuffer, create_buffer);
+    D(vkDestroyBuffer, destroy_buffer);
+    D(vkGetBufferMemoryRequirements, buffer_reqs);
+    D(vkBindBufferMemory, bind_buffer);
+    D(vkMapMemory, map_memory);
+    D(vkCmdCopyImageToBuffer, cmd_copy_to_buffer);
 #undef D
     return create_pool && alloc_cmd && begin_cmd && end_cmd && reset_cmd && cmd_barrier && create_fence && wait_fences &&
            reset_fences && create_semaphore && signal_semaphore && create_image && destroy_image && image_reqs && allocate && free_memory && bind_image && get_queue && queue_submit &&
@@ -150,6 +171,7 @@ struct Chain {
     std::vector<XrSwapchainImageVulkanKHR> images;
     std::vector<VkDeviceMemory> memory;
     uint32_t next = 0;
+    uint32_t w = 0, h = 0;
 };
 std::unordered_map<XrSwapchain, Chain> chains;
 enum SpaceKind { kLocal, kView, kHandLeft, kHandRight };
@@ -229,10 +251,26 @@ void maybe_stall() {
 XrPosef head_pose(XrTime t) {
     const double turn = env_num("FAKE_XR_TURN", 25.0) * M_PI / 180.0;
     const double yaw = turn * std::sin((double)t * 1e-9 * 2.0 * M_PI / 8.0);
+    // (FAKE_XR_PITCH=<deg>: the head tilted by that much too, negative down: to look at Link's legs and arms in first person)
+    const double pitch = env_num("FAKE_XR_PITCH", 0.0) * M_PI / 180.0;
+    const double cy = std::cos(yaw / 2), sy = std::sin(yaw / 2), cp = std::cos(pitch / 2), sp = std::sin(pitch / 2);
     XrPosef p{};
-    p.orientation = {0.0f, (float)std::sin(yaw / 2), 0.0f, (float)std::cos(yaw / 2)};
-    p.position = {0.0f, 1.6f, 0.0f};
+    p.orientation = {(float)(cy * sp), (float)(sy * cp), (float)(-sy * sp), (float)(cy * cp)};   // (yaw, then pitch)
+    const double sway = env_num("FAKE_XR_SWAY", 0.0), at = (double)t * 1e-9 * 2.0 * M_PI / 5.0;
+    p.position = {(float)(sway * std::sin(at)), (float)(1.6 + sway * std::cos(at)), (float)(0.5 * sway * std::sin(2 * at))};
     return p;
+}
+
+XrPosef compose(const XrPosef& a, const XrPosef& b) {
+    const XrQuaternionf &p = a.orientation, &q = b.orientation;
+    XrPosef o;
+    o.orientation = {p.w * q.x + p.x * q.w + p.y * q.z - p.z * q.y, p.w * q.y - p.x * q.z + p.y * q.w + p.z * q.x,
+                     p.w * q.z + p.x * q.y - p.y * q.x + p.z * q.w, p.w * q.w - p.x * q.x - p.y * q.y - p.z * q.z};
+    const XrVector3f& v = b.position;   // (v + 2 w (u x v) + 2 u x (u x v))
+    const float cx = p.y * v.z - p.z * v.y, cy = p.z * v.x - p.x * v.z, cz = p.x * v.y - p.y * v.x;
+    o.position = {a.position.x + v.x + 2 * (p.w * cx + p.y * cz - p.z * cy), a.position.y + v.y + 2 * (p.w * cy + p.z * cx - p.x * cz),
+                  a.position.z + v.z + 2 * (p.w * cz + p.x * cy - p.y * cx)};
+    return o;
 }
 
 // ---- the functions ----
@@ -354,6 +392,7 @@ XrResult XRAPI_CALL x_CreateSwapchain(XrSession, const XrSwapchainCreateInfo* ci
     VkPhysicalDeviceMemoryProperties mp;
     memory_props(sess.physical, &mp);
     Chain c;
+    c.w = ci->width, c.h = ci->height;
     for (int i = 0; i < 3; i++) {
         VkImageCreateInfo ic{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ic.imageType = VK_IMAGE_TYPE_2D;
@@ -446,6 +485,67 @@ XrResult XRAPI_CALL x_ReleaseSwapchainImage(XrSwapchain sc, const XrSwapchainIma
     touch_queue(img);
     return XR_SUCCESS;
 }
+/// FAKE_XR_DUMP: a released swapchain image (left by the game as a colour attachment) read back and written as a PPM
+void dump_image(VkImage image, uint32_t w, uint32_t h, const std::string& file) {
+    if (!create_buffer || !map_memory || !cmd_copy_to_buffer || !image || !w || !h) return;
+    VkBufferCreateInfo bc{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bc.size = (VkDeviceSize)w * h * 4;
+    bc.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (create_buffer(sess.device, &bc, nullptr, &buf) != VK_SUCCESS) return;
+    VkMemoryRequirements mr;
+    buffer_reqs(sess.device, buf, &mr);
+    VkPhysicalDeviceMemoryProperties mp;
+    memory_props(sess.physical, &mp);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = UINT32_MAX;
+    const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t t = 0; t < mp.memoryTypeCount && ai.memoryTypeIndex == UINT32_MAX; t++)
+        if ((mr.memoryTypeBits & (1u << t)) && (mp.memoryTypes[t].propertyFlags & want) == want) ai.memoryTypeIndex = t;
+    VkDeviceMemory m = VK_NULL_HANDLE;
+    if (ai.memoryTypeIndex == UINT32_MAX || allocate(sess.device, &ai, nullptr, &m) != VK_SUCCESS) return destroy_buffer(sess.device, buf, nullptr);
+    bind_buffer(sess.device, buf, m, 0);
+    reset_cmd(sess.cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    begin_cmd(sess.cmd, &bi);
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    b.srcAccessMask = b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    cmd_barrier(sess.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    VkBufferImageCopy c{};
+    c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    c.imageExtent = {w, h, 1};
+    cmd_copy_to_buffer(sess.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &c);
+    std::swap(b.oldLayout, b.newLayout);
+    cmd_barrier(sess.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+    end_cmd(sess.cmd);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &sess.cmd;
+    reset_fences(sess.device, 1, &sess.fence);
+    void* p = nullptr;
+    if (queue_submit(sess.queue, 1, &si, sess.fence) == VK_SUCCESS &&
+        wait_fences(sess.device, 1, &sess.fence, VK_TRUE, 2000000000ull) == VK_SUCCESS &&
+        map_memory(sess.device, m, 0, bc.size, 0, &p) == VK_SUCCESS && p) {
+        if (FILE* f = fopen(file.c_str(), "wb")) {
+            fprintf(f, "P6\n%u %u\n255\n", w, h);
+            std::vector<unsigned char> row(w * 3);
+            for (uint32_t y = 0; y < h; y++) {
+                const unsigned char* src = (const unsigned char*)p + (size_t)y * w * 4;
+                for (uint32_t x = 0; x < w; x++) row[x * 3] = src[x * 4], row[x * 3 + 1] = src[x * 4 + 1], row[x * 3 + 2] = src[x * 4 + 2];
+                fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+        }
+    }
+    destroy_buffer(sess.device, buf, nullptr);
+    free_memory(sess.device, m, nullptr);
+}
 XrResult XRAPI_CALL x_WaitFrame(XrSession, const XrFrameWaitInfo*, XrFrameState* fs) {
     int64_t t = now_ns();
     if (!sess.next_frame || t > sess.next_frame + 4 * sess.period) sess.next_frame = t;
@@ -474,6 +574,63 @@ XrResult XRAPI_CALL x_EndFrame(XrSession, const XrFrameEndInfo* ei) {
                     (void*)q->subImage.swapchain);
         }
     }
+    static const char* dump_dir = getenv("FAKE_XR_DUMP");
+    static uint64_t dump_at = 0;
+    static int dumps = 0;
+    const uint64_t dump_every = (uint64_t)(env_num("FAKE_XR_DUMP_S", 20) * 1e9);
+    if (dump_dir && *dump_dir && dumps < (int)env_num("FAKE_XR_DUMP_N", 6) && t - dump_at >= dump_every) {
+        for (uint32_t i = 0; i < ei->layerCount; i++) {
+            const XrCompositionLayerBaseHeader* l = ei->layers[i];
+            if (!l || l->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+            const XrCompositionLayerProjection* pl = (const XrCompositionLayerProjection*)l;
+            if (!dump_at) {   // (the first projection layer starts the clock: the first dump one period later)
+                dump_at = t;
+                break;
+            }
+            dump_at = t, dumps++;
+            for (uint32_t v = 0; v < pl->viewCount && v < 2; v++) {
+                const XrCompositionLayerProjectionView& pv = pl->views[v];
+                VkImage img = VK_NULL_HANDLE;
+                uint32_t w = 0, h = 0;
+                {
+                    std::lock_guard lk(mu);
+                    auto it = chains.find(pv.subImage.swapchain);
+                    if (it != chains.end()) img = acquired[pv.subImage.swapchain], w = it->second.w, h = it->second.h;
+                }
+                const std::string file = std::string(dump_dir) + "/eye" + std::to_string(dumps) + "-" + std::to_string(v) + ".ppm";
+                fprintf(stderr, "[fake xr] dump %d view %u: %s (%ux%u), pose x %.4f y %.4f z %.4f turn %.5f %.5f %.5f %.5f, fov L %.2f R %.2f U %.2f D %.2f deg, "
+                        "imageRect %d,%d %dx%d\n", dumps, v, file.c_str(), w, h, pv.pose.position.x, pv.pose.position.y,
+                        pv.pose.position.z, pv.pose.orientation.x, pv.pose.orientation.y, pv.pose.orientation.z, pv.pose.orientation.w,
+                        pv.fov.angleLeft * 57.2958f, pv.fov.angleRight * 57.2958f, pv.fov.angleUp * 57.2958f,
+                        pv.fov.angleDown * 57.2958f, pv.subImage.imageRect.offset.x, pv.subImage.imageRect.offset.y,
+                        pv.subImage.imageRect.extent.width, pv.subImage.imageRect.extent.height);
+                dump_image(img, w, h, file);
+            }
+            break;
+        }
+        const XrCompositionLayerBaseHeader* first = ei->layerCount ? ei->layers[0] : nullptr;
+        if (first && first->type == XR_TYPE_COMPOSITION_LAYER_QUAD && ((const XrCompositionLayerQuad*)first)->size.width > 1) {
+            const XrCompositionLayerQuad* q = (const XrCompositionLayerQuad*)first;   // (a flat frame as a quad, not the blank layer)
+            if (!dump_at) dump_at = t;
+            else {
+                dump_at = t, dumps++;
+                VkImage img = VK_NULL_HANDLE;
+                uint32_t w = 0, h = 0;
+                {
+                    std::lock_guard lk(mu);
+                    auto it = chains.find(q->subImage.swapchain);
+                    if (it != chains.end()) img = acquired[q->subImage.swapchain], w = it->second.w, h = it->second.h;
+                }
+                const std::string file = std::string(dump_dir) + "/eye" + std::to_string(dumps) + "-9.ppm";
+                fprintf(stderr, "[fake xr] dump %d quad: %s (%ux%u), pose x %.4f y %.4f z %.4f turn %.5f %.5f %.5f %.5f, %.4f x %.4f m, "
+                        "imageRect %d,%d %dx%d\n", dumps, file.c_str(), w, h, q->pose.position.x, q->pose.position.y, q->pose.position.z,
+                        q->pose.orientation.x, q->pose.orientation.y, q->pose.orientation.z, q->pose.orientation.w, q->size.width, q->size.height,
+                        q->subImage.imageRect.offset.x, q->subImage.imageRect.offset.y, q->subImage.imageRect.extent.width,
+                        q->subImage.imageRect.extent.height);
+                dump_image(img, w, h, file);
+            }
+        }
+    }
     if (!sess.said_at) sess.said_at = t;
     if (t - sess.said_at >= 10000000000ull) {
         fprintf(stderr, "[fake xr] %llu frames ended in the last 10 s, %llu layers\n",
@@ -494,6 +651,13 @@ XrResult XRAPI_CALL x_LocateSpace(XrSpace space, XrSpace, XrTime time, XrSpaceLo
     loc->pose = XrPosef{{0, 0, 0, 1}, {0, 0, 0}};
     if (k == kView) loc->pose = head_pose(time);
     if (k == kHandLeft || k == kHandRight) loc->pose.position = {k == kHandLeft ? -0.2f : 0.2f, 1.0f, -0.15f};
+    // (FAKE_XR_HAND_R=<x>,<y>,<z>: the right hand there instead, local space, metres: held up in front of the eyes)
+    static float hand_r[3];
+    static const bool hand_set = [] {
+        const char* e = getenv("FAKE_XR_HAND_R");
+        return e && sscanf(e, "%f,%f,%f", &hand_r[0], &hand_r[1], &hand_r[2]) == 3;
+    }();
+    if (k == kHandRight && hand_set) loc->pose.position = {hand_r[0], hand_r[1], hand_r[2]};
     for (auto* n = (XrBaseOutStructure*)loc->next; n; n = n->next)
         if (n->type == XR_TYPE_SPACE_VELOCITY) ((XrSpaceVelocity*)n)->velocityFlags = 0;
     return XR_SUCCESS;
@@ -503,16 +667,45 @@ XrResult XRAPI_CALL x_LocateViews(XrSession, const XrViewLocateInfo* li, XrViewS
     vs->viewStateFlags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
     if (!cap || !v) return XR_SUCCESS;
     if (cap < 2) return XR_ERROR_SIZE_INSUFFICIENT;
-    (void)li;
+    XrSpace in;
+    bool room;
+    {
+        std::lock_guard lk(mu);
+        in = li->space;
+        auto it = spaces.find(in);
+        room = it == spaces.end() || it->second != kView;
+    }
+    const XrPosef head = head_pose(li->displayTime);
+    static double cants[2];
+    static const bool canted = [] {
+        const char* c = getenv("FAKE_XR_CANT");
+        const int n = c ? sscanf(c, "%lf,%lf", &cants[0], &cants[1]) : 0;
+        if (n == 1) cants[1] = cants[0];
+        return n > 0;
+    }();
     // (Hookshot VR) the eyes' FOV, so the game's camera is the headset's: the player's logs' "vr: fov asked 109.6 x 111.6 deg" is
     // the camera's, the eyes' widened by the camera's guard band (vr/headset/frame_loop.inc kCameraGuardBand, 1.03). Handed as
     // the eyes' FOV it was widened twice: the camera 113.2 degrees high, the two-eye pipelines' P00 0.685 where the headset's
     // is 0.705, so a headless warm-up built no two-eye pipeline the headset uses (pipeline-key-stability.md)
     static const float kGuard = 1.03f, half_x = std::atan(std::tan(109.6f * 0.5f / 57.2958f) / kGuard),
                        half_y = std::atan(std::tan(111.6f * 0.5f / 57.2958f) / kGuard);
+    static float own[4];   // (FAKE_XR_FOV: the left eye's own, degrees)
+    static const bool asymmetric = [] {
+        const char* e = getenv("FAKE_XR_FOV");
+        const bool ok = e && sscanf(e, "%f,%f,%f,%f", &own[0], &own[1], &own[2], &own[3]) == 4;
+        if (ok) fprintf(stderr, "[fake xr] eyes' FOV: left %.1f %.1f %.1f %.1f deg, the right its mirror image\n", own[0], own[1], own[2], own[3]);
+        return ok;
+    }();
     for (int e = 0; e < 2; e++) {   // (in the view space: the eyes 63 mm apart)
         v[e].pose = XrPosef{{0, 0, 0, 1}, {e ? 0.0316f : -0.0316f, 0, 0}};
         v[e].fov = {-half_x, half_x, half_y, -half_y};
+        if (asymmetric) {
+            const float k = 1 / 57.2958f;
+            v[e].fov = e ? XrFovf{-own[1] * k, -own[0] * k, own[2] * k, own[3] * k} : XrFovf{own[0] * k, own[1] * k, own[2] * k, own[3] * k};
+        }
+        const double cant = canted ? cants[e] * M_PI / 360.0 : 0.0;
+        v[e].pose.orientation = {0, (float)(e ? -std::sin(cant) : std::sin(cant)), 0, (float)std::cos(cant)};
+        if (room) v[e].pose = compose(head, v[e].pose);
     }
     return XR_SUCCESS;
 }
@@ -524,6 +717,21 @@ XrResult XRAPI_CALL x_EnumerateViewConfigurationViews(XrInstance, XrSystemId, Xr
         v[e].recommendedImageRectHeight = v[e].maxImageRectHeight = 2304;
         v[e].recommendedSwapchainSampleCount = v[e].maxSwapchainSampleCount = 1;
     }
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL x_EnumerateViewConfigurations(XrInstance, XrSystemId, uint32_t cap, uint32_t* n, XrViewConfigurationType* t) {
+    *n = 1;
+    if (cap && t) t[0] = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL x_GetViewConfigurationProperties(XrInstance, XrSystemId, XrViewConfigurationType t, XrViewConfigurationProperties* p) {
+    p->viewConfigurationType = t;
+    p->fovMutable = XR_TRUE;
+    return XR_SUCCESS;
+}
+XrResult XRAPI_CALL x_EnumerateReferenceSpaces(XrSession, uint32_t cap, uint32_t* n, XrReferenceSpaceType* t) {
+    *n = 2;
+    if (cap >= 2 && t) t[0] = XR_REFERENCE_SPACE_TYPE_VIEW, t[1] = XR_REFERENCE_SPACE_TYPE_LOCAL;
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL x_StringToPath(XrInstance, const char* s, XrPath* p) {
@@ -543,8 +751,10 @@ XrResult XRAPI_CALL x_CreateActionSet(XrInstance, const XrActionSetCreateInfo*, 
     *out = make_handle<XrActionSet>();
     return XR_SUCCESS;
 }
-XrResult XRAPI_CALL x_CreateAction(XrActionSet, const XrActionCreateInfo*, XrAction* out) {
+XrAction menu_action = XR_NULL_HANDLE;   // (FAKE_XR_MENU_AT: the left menu button)
+XrResult XRAPI_CALL x_CreateAction(XrActionSet, const XrActionCreateInfo* ci, XrAction* out) {
     *out = make_handle<XrAction>();
+    if (!strcmp(ci->actionName, "menu")) menu_action = *out;
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL x_SuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding*) { return XR_SUCCESS; }
@@ -554,8 +764,19 @@ XrResult XRAPI_CALL x_GetActionStateFloat(XrSession, const XrActionStateGetInfo*
     st->currentState = 0, st->changedSinceLastSync = XR_FALSE, st->lastChangeTime = 0, st->isActive = XR_TRUE;
     return XR_SUCCESS;
 }
-XrResult XRAPI_CALL x_GetActionStateBoolean(XrSession, const XrActionStateGetInfo*, XrActionStateBoolean* st) {
-    st->currentState = XR_FALSE, st->changedSinceLastSync = XR_FALSE, st->lastChangeTime = 0, st->isActive = XR_TRUE;
+XrResult XRAPI_CALL x_GetActionStateBoolean(XrSession, const XrActionStateGetInfo* gi, XrActionStateBoolean* st) {
+    // (FAKE_XR_MENU_AT=<s>[,<s>..]: the menu button held 0.9 s from each of those seconds of the session, opening and closing the VR menu)
+    static const int64_t began = now_ns();
+    bool held = false;
+    if (const char* at = gi->action == menu_action ? getenv("FAKE_XR_MENU_AT") : nullptr)
+        for (const char* p = at; *p;) {
+            char* end = nullptr;
+            const double from = strtod(p, &end), now = (double)(now_ns() - began) * 1e-9;
+            if (end == p) break;
+            held = held || (now >= from && now < from + 0.9);
+            p = *end == ',' ? end + 1 : end;
+        }
+    st->currentState = held ? XR_TRUE : XR_FALSE, st->changedSinceLastSync = XR_FALSE, st->lastChangeTime = 0, st->isActive = XR_TRUE;
     return XR_SUCCESS;
 }
 XrResult XRAPI_CALL x_GetActionStateVector2f(XrSession, const XrActionStateGetInfo*, XrActionStateVector2f* st) {
@@ -592,7 +813,7 @@ const Entry entries[] = {
     X(DestroySession), X(BeginSession), X(EndSession), X(PollEvent), X(CreateReferenceSpace), X(EnumerateSwapchainFormats),
     X(CreateSwapchain), X(DestroySwapchain), X(EnumerateSwapchainImages), X(AcquireSwapchainImage), X(WaitSwapchainImage),
     X(ReleaseSwapchainImage), X(WaitFrame), X(BeginFrame), X(EndFrame), X(LocateSpace), X(LocateViews),
-    X(EnumerateViewConfigurationViews), X(StringToPath), X(PathToString), X(CreateActionSet), X(CreateAction),
+    X(EnumerateViewConfigurationViews), X(EnumerateViewConfigurations), X(GetViewConfigurationProperties), X(EnumerateReferenceSpaces), X(StringToPath), X(PathToString), X(CreateActionSet), X(CreateAction),
     X(SuggestInteractionProfileBindings), X(AttachSessionActionSets), X(SyncActions), X(GetActionStateFloat),
     X(GetActionStateBoolean), X(GetActionStateVector2f), X(GetActionStatePose), X(CreateActionSpace), X(ApplyHapticFeedback),
     X(GetCurrentInteractionProfile),

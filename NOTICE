@@ -19,11 +19,12 @@ What changed (a VR fork of Hookshot)
 
 HookshotVR is a modified version of Hookshot (https://git.notrexed.dev/Hookshot/Hookshot), the static recompilation of
 the game by NotRexed and its contributors. It was made from Hookshot's source in November 2026. Hookshot's own code is
-still here, in its own folders, so its updates can be merged.
+still here, in its own folders, so its updates can be merged. The builder toolchain bundled with the release comes from
+Hookshot v2.2.0-rc.1's builder, with Hookshot v3.0.0 code.
 
 What this fork adds or changes:
 
-  - vr/: everything for VR. The OpenXR session and the headset's frames; both eyes ("From depth" and "True stereo");
+  - vr/: everything for VR. The OpenXR session and the headset's frames; both eyes ("Mono" and "Stereo");
     the head-driven camera; Link's body, hands and held items; sword, shield, bombs, bottles, bow, slingshot, boomerang,
     hookshot, ocarina and the other items in the hands; the wrist HUD, the radial wheel and the VR menu; comfort options;
     the Window view; cutscenes and Item Get views for VR.

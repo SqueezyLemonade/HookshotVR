@@ -106,7 +106,7 @@ Proc spawn(const std::vector<std::string> &argv, const Env &env, const std::stri
     args.push_back(nullptr);
     int fds[2] = {-1, -1};
     if (out == Out::Pipe && pipe(fds) != 0) return p;
-    int file_fd = out == Out::File ? ::open(file.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : -1;
+    int file_fd = out == Out::File ? ::open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644) : -1;
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
@@ -186,6 +186,27 @@ bool process_running(const char *name) {
     }
     closedir(d);
     return found;
+}
+
+void error_box(const char *title, const char *text) { fprintf(stderr, "%s: %s\n", title, text); }
+int process_count(const char *name) {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    int n = 0;
+    while (dirent *e = readdir(d)) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        char path[300], comm[64] = {0};
+        snprintf(path, sizeof path, "/proc/%s/comm", e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        if (fgets(comm, sizeof comm, f)) {
+            comm[strcspn(comm, "\n")] = 0;
+            n += !strcmp(comm, name);
+        }
+        fclose(f);
+    }
+    closedir(d);
+    return n;
 }
 
 bool on_path(const char *tool) {

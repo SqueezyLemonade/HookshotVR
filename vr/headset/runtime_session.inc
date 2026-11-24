@@ -54,6 +54,7 @@ void instance_extensions(std::vector<const char*>& exts) {
         logf("vr: VR is on, but the OpenXR runtime did not start (%d): check your active OpenXR runtime; VR off this run", (int)r);
         return;
     }
+    tester_extensions(ci);
     if (!load_functions(s.inst)) {
         logf("vr: the OpenXR runtime lacks functions VR needs: VR off");
         return;
@@ -66,6 +67,16 @@ void instance_extensions(std::vector<const char*>& exts) {
     if (XR_FAILED(xrGetSystem(s.inst, &sg, &s.system))) {
         logf("vr: no headset (connect your headset to your OpenXR runtime before starting the game): VR off this run");
         return;
+    }
+    {   // (once, for a player's log: the runtime, its version and the headset)
+        XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        const bool have_ip = XR_SUCCEEDED(xrGetInstanceProperties(s.inst, &ip));
+        const bool have_sp = window_xrGetSystemProperties && XR_SUCCEEDED(window_xrGetSystemProperties(s.inst, s.system, &sp));
+        logf("vr: runtime %s %u.%u.%u, system \"%s\" (vendor %#x), max swapchain %ux%u, %u layers", have_ip ? ip.runtimeName : "?",
+             have_ip ? (unsigned)XR_VERSION_MAJOR(ip.runtimeVersion) : 0u, have_ip ? (unsigned)XR_VERSION_MINOR(ip.runtimeVersion) : 0u,
+             have_ip ? (unsigned)XR_VERSION_PATCH(ip.runtimeVersion) : 0u, have_sp ? sp.systemName : "?", have_sp ? sp.vendorId : 0u,
+             have_sp ? sp.graphicsProperties.maxSwapchainImageWidth : 0u, have_sp ? sp.graphicsProperties.maxSwapchainImageHeight : 0u,
+             have_sp ? sp.graphicsProperties.maxLayerCount : 0u);
     }
     XrGraphicsRequirementsVulkanKHR req{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN_KHR};
     xrGetVulkanGraphicsRequirementsKHR(s.inst, s.system, &req);
@@ -161,6 +172,7 @@ void device_created() {
     xrCreateReferenceSpace(s.session, &rs, &s.local);
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     xrCreateReferenceSpace(s.session, &rs, &s.view);
+    tester_create_swapchain = xrCreateSwapchain, xrCreateSwapchain = tester_swapchain;   // (each swapchain logged)
     uint32_t nf = 0;
     xrEnumerateSwapchainFormats(s.session, 0, &nf, nullptr);
     std::vector<int64_t> formats(nf);
@@ -178,6 +190,7 @@ void device_created() {
         return;
     }
     logf("vr: OpenXR color swapchain is %s", swap_format == VK_FORMAT_R8G8B8A8_SRGB ? "RGBA8 sRGB" : "RGBA8 UNORM fallback");
+    tester_session_report(formats);
     window_runtime_report();   // (what the runtime offers the Window view's room)
     make_controls();   // (OoT VR: the hands; before the first frame, as attaching must be)
     s.running = true;

@@ -94,7 +94,8 @@ write (it has no `X-HookshotVR-Launcher` line) is left alone. Run it again after
   once the runtime and the headset answer (Starting; pressed again, it stops waiting). The launcher never starts a
   runtime by itself, and never stops one.
 - **Play** starts the build's `bin/hookshot` (or `hookshot`; `hookshot.exe` on Windows) in its folder, in a session of
-  its own, its output to `<logs>/last-run.log` (the run before kept as `last-run.1.log`). With On Game Start: Close
+  its own, its output to `<logs>/last-run.log` (the five runs before kept as `last-run.1.log`, the latest, to
+  `last-run.5.log`), whose first line says which launcher and VR Runtime started it. With On Game Start: Close
   Launcher the launcher then ends; with Keep Open the button says Running until the game ends. On Windows the game is
   given `--user %APPDATA%\Hookshot`, as Hookshot's own launcher does, so its saves and settings stay put when an update
   builds into a new folder; on Linux `--user ~/.local/share/hookshot` (`$XDG_DATA_HOME`), where the game kept its saves
@@ -171,7 +172,7 @@ v1.0.1 once by hand.
 api.github.com, `<base>/site` for github.com and `<base>/raw` for raw.githubusercontent.com, plain http allowed
 (`tools/fake_release_server.py` serves a folder so). Never set it for a player.
 
-The version (`upd::kVersion`, v1.0.1, shown as `kVersionName`, Alpha v1.0.1) opens the Changelog, read from
+The version (`upd::kVersion`, v1.0.2, shown as `kVersionName`, Alpha v1.0.2) opens the Changelog, read from
 `CHANGELOG.txt`: a `vX.Y.Z` line, then its lines. View Online opens the release's page on GitHub.
 
 ## Art slots

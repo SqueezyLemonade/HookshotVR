@@ -492,6 +492,7 @@ std::atomic<int64_t> st_lf_wait_ns{0};   // (the frame trace's late_fix_ms: any 
 } // namespace
 void vk_tl_note(const char* what, uint64_t a, uint64_t b) { tl_ev(what, a, b); }
 uint64_t vk_timeline_signal_sent() { return tl_signal_sent.load(std::memory_order_acquire); }
+uint64_t vk_timeline_done() { uint64_t v = 0; vkGetSemaphoreCounterValue(dev.device, timeline, &v); return v; }
 void vk_timeline_wait_sent(uint64_t v) {
     if (!timeline || completed() >= v) return;
     VkSemaphoreWaitInfo wi{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
@@ -7416,6 +7417,10 @@ void do_present(const nvn_tex* t, const int crop[4], float cover) {
         ts_anchor_ns = host->ticks() * 32;
         dump_present(presents);
         if (src) vr::hud_note_presented(src);   // (OoT VR: HUD size learns the 2D layer's image; windowless runs too)
+        // (OoT VR, no window: the headset's eyes from the offscreen copy's submit, as a window's present takes them
+        // (present_image). For the stand-in headset's headless runs (vr/tools/fake_headset); before, they had no eyes)
+        const bool vr_offscreen = dev.offscreen && src;
+        if (vr_offscreen) vr::present(r.cmd, src, sw, sh, crop);
         if (src && (dev.offscreen || shots) && offscreen_init()) {
             if (dev.offscreen) {
                 image_barrier(r.cmd, off_image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -7490,6 +7495,7 @@ void do_present(const nvn_tex* t, const int crop[4], float cover) {
         memory_end_submission(r.cmd, r.part);
         full_barrier(r.cmd);
         submit_recording(r);   // (nothing is stopped at a present: drain)
+        if (vr_offscreen) vr::present_done_at(value);   // (its eyes ready once the GPU is past this submit)
         if (pushed.load() < value) pushed = value;
         done_max = std::max(done_max, value), signaled = std::max(signaled, value);
         shot_ask_take();   // (an earlier present's, when the GPU is past it)
@@ -9813,6 +9819,7 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == 1030) return opts.vr_turn_style;   // VR HOOK (OoT VR: first person, Turn style: 0 smooth, 1 snap, vr/camera/view_host.c)
         if (id == 1031) return opts.vr_snap_angle;   // VR HOOK (OoT VR: Snap angle: 0 30, 1 45, 2 60, 3 90 degrees)
         if (id == 1032) return opts.vr_turn_speed;   // VR HOOK (OoT VR: Smooth turn speed: 0 Slow, 1 Medium, 2 Fast, 3 Very fast)
+        if (id == 1034) return opts.vr_menu_button;   // VR HOOK (OoT VR: Menu button: 0 the left upper button, 1 both stick clicks, vr/input/controllers_host.c)
         if (id == 1033)   // VR HOOK (OoT VR: which Comfort Aids' vignettes are on, a bit each, vr/comfort/comfort_host.c)
             return (opts.vr_vignette_move > 0) | (opts.vr_vignette_turn > 0) << 1 | (opts.vr_vignette_air > 0) << 2 |
                    (opts.vr_vignette_carried > 0) << 3;
