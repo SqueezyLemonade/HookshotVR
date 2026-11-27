@@ -27,12 +27,18 @@ the keep_* functions lift.py asks before the functions are written change these 
     before it acts, and then answers no for a function it would change in a whole file; so, on the safe side,
     keep_mentioned() first keeps every function that holds an address the patch file names (its edits are pinned to
     those). check_patched() looks at the written files afterwards and stops the lift if a function carries both a
-    patch's mark and locals."""
+    patch's mark and locals.
+  - a giant keeps the context as well: a function whose C, with the context kept, is split_giants.MIN_KB or more. The
+    splitter (nx2/split_giants.py) leaves a function with locals whole (they are live across its labels), and one such
+    function compiles whole with every pass: OoT's f_81bfd8a0, 1.75 MB of C, held one compiler for ~13 minutes and
+    4+ GB at the end of a first build, the progress at 100% with nothing printed (issue #6 reads the same). Kept in the
+    context it is cut into pieces like the other giants."""
 import glob
 import os
 import re
 
 import a64_lift
+import split_giants
 
 REGS = 6   # (measured 2026-11-15: 4 and 8 are slower than 6; 8 spills on x86)
 
@@ -145,6 +151,8 @@ def check_patched(gen):
 
 _keep = [False]   # (the function being emitted keeps its context: emit_function below sets it for localize_regs)
 _kept = [0]       # (functions the patches would change, kept in the context by localize_regs since emit_function last read it)
+_giant = [False]  # (the function being emitted was kept in the context for its size: GIANT_BYTES)
+GIANT_BYTES = split_giants.MIN_KB * 1024   # (the size the splitter cuts from: a function it must be able to cut)
 _installed = False
 
 
@@ -171,22 +179,34 @@ def install(touched=None):
     def localize_regs(text, local, dirty):
         if _keep[0]:
             return kept(text)
-        if touched is not None and (local or local_flags()):
+        if not (local or local_flags()):
+            return base_localize(text, local, dirty)
+        plain = None
+        if touched is not None:
             plain = kept(text)
             if touched(plain):   # (a patch finds its place here: it stays as the patch expects it)
                 _kept[0] += 1
+                return plain
+        if len(text) >= GIANT_BYTES:   # (the text with its context marks is no shorter than the kept one: most are not read twice)
+            plain = plain if plain is not None else kept(text)
+            if len(plain) >= GIANT_BYTES:   # (a giant: the splitter must be able to cut it)
+                _giant[0] = True
                 return plain
         return base_localize(text, local, dirty)
 
     def emit_function(self, e, texts):
         _keep[0] = e in self.no_local
         _kept[0] = 0
+        _giant[0] = False
         try:
             return base_emit(self, e, texts)
         finally:
             _keep[0] = False
             if _kept[0]:
                 self.stats["locals_kept_for_patches"] += 1
+            if _giant[0]:
+                self.stats["locals_kept_for_giants"] += 1
+                _giant[0] = False
 
     a64_lift.localize_regs = localize_regs
     a64_lift.Lifter.emit_function = emit_function
