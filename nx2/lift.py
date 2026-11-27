@@ -244,6 +244,7 @@ def main():
         if a64_lift.local_regs() or a64_lift.local_flags():   # (nx2/guest_locals.py: the patched functions kept the context)
             print("locals: %d functions kept in the context for the patches; %d patched functions checked in the written C" % (
                 L.stats["locals_kept_for_patches"], local_regs.check_patched(gen)))
+            print("locals: %d giant functions kept in the context, for the splitter (nx2/split_giants.py)" % L.stats["locals_kept_for_giants"])
             took("locals check")
         print("\n".join(chunks.end_side(side, tables)), flush=True)
         took("runtime tables and standalone files (beside the edits)" if side else "runtime tables and standalone files")
