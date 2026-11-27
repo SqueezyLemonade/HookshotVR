@@ -61,7 +61,7 @@ void instance_extensions(std::vector<const char*>& exts) {
     }
     window_load_functions(s.inst);   // (optional, each)
     XrInstanceProperties ip{XR_TYPE_INSTANCE_PROPERTIES};
-    if (XR_SUCCEEDED(xrGetInstanceProperties(s.inst, &ip))) logf("vr: OpenXR runtime %s", ip.runtimeName);
+    if (XR_SUCCEEDED(xrGetInstanceProperties(s.inst, &ip))) xr_runtime = ip.runtimeName, logf("vr: OpenXR runtime %s", ip.runtimeName);
     XrSystemGetInfo sg{XR_TYPE_SYSTEM_GET_INFO};
     sg.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     if (XR_FAILED(xrGetSystem(s.inst, &sg, &s.system))) {

@@ -1,4 +1,4 @@
-// Hookshot VR: The headset frame loop: tracking, completed-frame selection and compositor submission.
+﻿// Hookshot VR: The headset frame loop: tracking, completed-frame selection and compositor submission.
 // Included by vr/headset/vk_vr.cpp in the order shown there; not a separate compilation unit.
 
 // ---- a frame with nothing to show: one blank layer, never none (WiVRn showed black and dropped the controllers' input after
@@ -128,6 +128,7 @@ void headset_thread() {
                        (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
         if (head_ok) head = loc.pose, publish_pose(head, fs.predictedDisplayTime);
         const bool head_tracked = head_ok && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT);   // (the Window view's eyes)
+        ovr_head = head, ovr_head_ok = head_tracked;   // (the frame the OpenVR fallback places the hands in)
         XrView eye_view[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};   // (the eyes from the head, as located: the Window view's)
         bool eye_view_ok = false;
         XrView room_view[2] = {{XR_TYPE_VIEW}, {XR_TYPE_VIEW}};   // (the eyes in the room, as located: a flat frame's views)
@@ -371,7 +372,20 @@ void headset_thread() {
             }
         }
         XrCompositionLayerQuad blank_quad;   // (nothing else this frame: one blank layer, never zero)
-        if (!n_layers && blank_layer(blank_quad)) layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&blank_quad;
+        // (SteamVR's OpenXR does not return from xrEndFrame when that blank layer is the 4x4 static quad below: it waits
+        // for it, no frame is shown, and the game stops before its first picture (seen with SteamVR 2.18.4 + PICO Connect
+        // 10.6.6 on a Pico 4). A frame with no layer at all is what OpenXR allows and what it takes. HOOKSHOT_VR_NO_BLANK
+        // says it for any runtime, 0 to keep the quad.)
+        static const bool no_blank = [] {
+            const char* v = std::getenv("HOOKSHOT_VR_NO_BLANK");
+            if (v && *v) return *v != '0';
+            return xr_runtime.find("SteamVR") != std::string::npos;
+        }();
+        if (!n_layers && !no_blank && blank_layer(blank_quad)) layers[n_layers++] = (const XrCompositionLayerBaseHeader*)&blank_quad;
+        if (!n_layers && no_blank) {
+            static bool said_once = false;
+            if (!said_once) said_once = true, logf("vr: a frame with nothing to show is sent with no layer (this runtime waits on the blank quad)");
+        }
         XrFrameEndInfo ei{XR_TYPE_FRAME_END_INFO};
         ei.displayTime = fs.predictedDisplayTime;
         ei.environmentBlendMode = window_blend_mode();   // (opaque, but for the Window view's room by alpha blend)

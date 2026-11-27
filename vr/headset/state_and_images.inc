@@ -7,6 +7,10 @@
 const std::chrono::steady_clock::time_point run_start = std::chrono::steady_clock::now();
 double run_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - run_start).count(); }
 
+/// The OpenXR runtime's own name (xrGetInstanceProperties), set once the instance is made: some of them need a frame
+/// without layers where another takes a blank quad (vr/headset/frame_loop.inc)
+std::string xr_runtime;
+
 constexpr int kSlots = 4;   // (the headset's copies of the game's pictures: one being written while the eyes read another)
 constexpr int kMenuSlots = 3;
 constexpr int kPoses = 64;
