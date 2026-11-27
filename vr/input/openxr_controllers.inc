@@ -1,4 +1,4 @@
-// Hookshot VR: Raw OpenXR controller actions, bindings, tracking and haptics.
+﻿// Hookshot VR: Raw OpenXR controller actions, bindings, tracking and haptics.
 // Included by vr/headset/vk_vr.cpp in the order shown there; not a separate compilation unit.
 
 // ---- OpenXR controllers: tracking, buttons and haptics ----------------------------------------------------------------------
@@ -309,6 +309,10 @@ void haptic_pulse(int h, float amplitude, int64_t ns) {
     xrApplyHapticFeedback(s.session, &hi, (const XrHapticBaseHeader*)&v);
 }
 
+// (openvr_hands.inc: the fallback for a runtime that binds no controller profile)
+void ovr_fill(int h, HandState& hs);
+void ovr_try_start();
+
 /// Each headset frame: the actions synced, both hands located at the frame's display time
 void update_controls(XrTime t) {
     if (!ctl.attached) return;
@@ -317,6 +321,7 @@ void update_controls(XrTime t) {
     sy.countActiveActionSets = 1;
     sy.activeActionSets = &active;
     if (XR_FAILED(xrSyncActions(s.session, &sy))) return;   // (not focused: the last state stays)
+    if (!ctl.now[0].valid && !ctl.now[1].valid) ovr_try_start();   // (nothing bound: OpenVR may have them)
     for (int h = 0; h < 2; h++) {
         HandState& hs = ctl.now[h];
         const HandState was = hs;
@@ -351,6 +356,8 @@ void update_controls(XrTime t) {
         hs.buttons = (get_bool(ctl.lower, h) ? HOOKSHOT_VR_BTN_LOWER : 0) | (get_bool(ctl.upper, h) ? HOOKSHOT_VR_BTN_UPPER : 0) |
                      (get_bool(ctl.stick_click, h) ? HOOKSHOT_VR_BTN_STICK : 0) | (get_bool(ctl.menu, h) ? HOOKSHOT_VR_BTN_MENU : 0) |
                      (hs.trigger > 0.85f ? HOOKSHOT_VR_BTN_TRIGGER : 0) | (hs.squeeze > 0.85f ? HOOKSHOT_VR_BTN_GRIP : 0);
+        // (the runtime bound no controller for this hand: read it from OpenVR instead, same local space)
+        if (!hs.valid) ovr_fill(h, hs);
         // (the test of the whole path, input to haptics: a short pulse when the trigger or grip is pressed fully, and the
         // presses in the log, 40 of them)
         const uint32_t pressed = hs.buttons & ~was.buttons;

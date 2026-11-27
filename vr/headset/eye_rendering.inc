@@ -1,4 +1,4 @@
-// Hookshot VR: OpenXR eye swapchains, depth reprojection and the flat menu layer.
+﻿// Hookshot VR: OpenXR eye swapchains, depth reprojection and the flat menu layer.
 // Included by vr/headset/vk_vr.cpp in the order shown there; not a separate compilation unit.
 
 // Flat screens keep their own aspect ratio. These values control only their apparent size/distance, not world scale.
@@ -241,7 +241,9 @@ void poll_events() {
             if (e->state == XR_SESSION_STATE_READY) {
                 XrSessionBeginInfo bi{XR_TYPE_SESSION_BEGIN_INFO};
                 bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-                if (XR_SUCCEEDED(xrBeginSession(s.session, &bi))) s.session_running = true;
+                const XrResult br = xrBeginSession(s.session, &bi);   // (its answer, once, in the log)
+                if (XR_SUCCEEDED(br)) s.session_running = true;
+                logf("vr: xrBeginSession -> %d (%s)", (int)br, XR_SUCCEEDED(br) ? "session running" : "FAILED");
             } else if (e->state == XR_SESSION_STATE_STOPPING) {
                 xrEndSession(s.session);
                 s.session_running = false;

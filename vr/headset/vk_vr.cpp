@@ -1,4 +1,4 @@
-// Hookshot VR: headset entry point. Public API: vr/vk_vr.h. Folder guide: vr/README.md.
+﻿// Hookshot VR: headset entry point. Public API: vr/vk_vr.h. Folder guide: vr/README.md.
 // The includes below are ordered sections of ONE compilation unit, not alternate headset implementations.
 //
 // OpenXR through XR_KHR_vulkan_enable on the back end's own device (no second device, nothing shared between processes). The
@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <initializer_list>
@@ -73,6 +74,7 @@ namespace {
 #include "poses.inc"
 #include "eye_rendering.inc"
 #include "../input/openxr_controllers.inc"
+#include "../input/openvr_hands.inc"   // (the fallback for a runtime that binds no controller profile)
 #include "markers.inc"
 #include "../menu/radial_draw.inc"
 #include "../menu/vr_menu_layer.inc"   // (the VR menu's panel in the world)
